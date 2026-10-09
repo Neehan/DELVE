@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# data and logs
+/data/
+/output/
+/logs/
+AGENTS.md
+
+# custom files
+research_proposal.pdf

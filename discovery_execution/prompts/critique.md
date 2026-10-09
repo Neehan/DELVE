@@ -1,0 +1,1 @@
+Critically review your latest solution. Check the interpretation of the problem, calculations, assumptions, logical steps, and final answer. Identify concrete errors or gaps and explain how they could be corrected. If you find no error, explain what you checked. Produce a critique, not a replacement solution. Do not use \boxed{} for quoted answers or intermediate calculations.
