@@ -1,0 +1,89 @@
+"""CLI entrypoint for frozen-policy vLLM trajectory collection."""
+
+import asyncio
+import logging
+import os
+import sys
+from argparse import ArgumentParser
+from collections.abc import Mapping
+from datetime import datetime, timezone
+
+import httpx
+from dotenv import load_dotenv
+
+from discovery_execution.harness.runner import Runner
+from discovery_execution.harness.constants import (
+    COMPETITIONS, DATASETS_DIRECTORY, DEFAULT_BATCH_SIZE, DEFAULT_INJECTION, DEFAULT_SOLUTION_INDEX,
+    ENV_FILE, FAILURE_EXIT_CODE, LOG_FORMAT, LOGS_DIRECTORY, OUTPUT_DIRECTORY, SUCCESS_EXIT_CODE, SUPPORTED_MODELS,
+    ORACLE_EXECUTION_EXPERIMENT, TEMPERATURE, TOP_K, TOP_P, TOTAL_BLOCKS, UNAIDED_EXPERIMENT, VLLM_TIMEOUT_SECONDS,
+)
+from discovery_execution.harness.models import BackendConfig, RunConfig
+from discovery_execution.harness.openai_client import OpenAIClient
+
+
+def parse_arguments(arguments: list[str]) -> RunConfig:
+    """Parse generation selection and validate a non-overwriting run namespace."""
+    parser = ArgumentParser(allow_abbrev=False)
+    parser.add_argument("--competition", required=True, choices=COMPETITIONS)
+    parser.add_argument("--year", required=True, type=int)
+    parser.add_argument("--model", required=True, choices=SUPPORTED_MODELS)
+    parser.add_argument("--experiment", required=True, choices=(UNAIDED_EXPERIMENT, ORACLE_EXECUTION_EXPERIMENT))
+    parser.add_argument("--compute-multiplier-k", type=int, choices=range(1, TOTAL_BLOCKS + 1),
+                        help="Required for unaided; oracle-execution is fixed at 8")
+    parser.add_argument("--seeds", required=True, type=int, nargs="+")
+    parser.add_argument("--run-id", required=True, help="Frozen configuration namespace, e.g. pilot-v1")
+    parser.add_argument("--inject-sketch-at", type=int, default=DEFAULT_INJECTION)
+    parser.add_argument("--solution-index", type=int, default=DEFAULT_SOLUTION_INDEX)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Maximum concurrent trajectories (default: {DEFAULT_BATCH_SIZE})")
+    args = vars(parser.parse_args(arguments))
+    if args["compute_multiplier_k"] is None:
+        if args["experiment"] == UNAIDED_EXPERIMENT:
+            parser.error("unaided requires --compute-multiplier-k")
+        args["compute_multiplier_k"] = TOTAL_BLOCKS
+    try:
+        return RunConfig(
+            **args, datasets_directory=DATASETS_DIRECTORY, output_directory=OUTPUT_DIRECTORY,
+            dataset_repo_url=os.environ.get("HF_DATASET_REPO_URL"),
+        )
+    except ValueError as error:
+        parser.error(str(error))
+
+
+def backend_configuration(environment: Mapping[str, str]) -> BackendConfig:
+    """Read the required endpoint and use fixed sampling and timeout constants."""
+    return BackendConfig(
+        base_url=environment["VLLM_BASE_URL"].rstrip("/"),
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        timeout=VLLM_TIMEOUT_SECONDS,
+    )
+
+
+async def main() -> None:
+    """Load environment and report a nonzero exit code if any requested seed failed."""
+    load_dotenv(ENV_FILE, override=False)
+    config = parse_arguments(sys.argv[1:])
+    LOGS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=[
+        logging.StreamHandler(), logging.FileHandler(LOGS_DIRECTORY / f"{config.run_id}-{timestamp}.log"),
+    ])
+    try:
+        backend_config = backend_configuration(os.environ)
+        api_key = os.environ.get("VLLM_API_KEY")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        limits = httpx.Limits(max_connections=config.batch_size)
+        async with httpx.AsyncClient(headers=headers, timeout=backend_config.timeout, limits=limits) as transport:
+            client = OpenAIClient(transport, backend_config, asyncio.sleep)
+            runner = Runner(config, client)
+            succeeded = await runner.run()
+    except Exception:
+        logging.exception("Run setup failed")
+        raise SystemExit(FAILURE_EXIT_CODE)
+    raise SystemExit(SUCCESS_EXIT_CODE if succeeded else FAILURE_EXIT_CODE)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
