@@ -26,7 +26,7 @@ def main() -> None:
         for year in args.year:
             config = DatasetConfig(
                 competition=competition, year=year, datasets_directory=DATASETS_DIRECTORY,
-                hf_repo=os.environ.get("HF_REPO"),
+                hf_repo=os.environ.get("HF_DATASETS_REPO"),
             )
             dataset = Dataset(config)
             print(f"Validated {competition}/{year}: {len(dataset)} problems")
