@@ -11,7 +11,7 @@ from discovery_execution.audit.compiler import AuditCompiler
 from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
 from discovery_execution.audit.models import AuditRecord
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CONVERSATION_FILENAME, RUN_FILENAME,
+    AUDIT_FILENAME, CONVERSATION_FILENAME, META_FILENAME,
 )
 from discovery_execution.harness.models import DatasetConfig, Problem, RunState
 from discovery_execution.harness.storage import Storage, write_json
@@ -28,7 +28,7 @@ def saved_runs(tmp_path: Path, conversation: RunState, problem: Problem,
     for seed in (0, 1):
         path = tmp_path / "output" / problem.competition / str(problem.year) / model_name / "unaided-2x" / f"problem-{seed}" / f"seed_{seed}"
         path.mkdir(parents=True)
-        write_json(path / RUN_FILENAME, {**dataset_config.model_dump(mode="json"), "problem_id": f"problem-{seed}",
+        write_json(path / META_FILENAME, {**dataset_config.model_dump(mode="json"), "problem_id": f"problem-{seed}",
                                          "seed": seed, "arm": "unaided-2x", "compute_multiplier_k": 2, "model": model_name,
                                          "experiment": "unaided", "inject_sketch_at": 0, "solution_index": 0})
         state = conversation.model_copy(deep=True)
@@ -111,7 +111,7 @@ def test_missing_checkpoint_writes_nothing(saved_runs: list[Path], tmp_path: Pat
     """Discover missing checkpoints before updating other selected seeds."""
     incomplete = tmp_path / "incomplete"
     incomplete.mkdir()
-    write_json(incomplete / RUN_FILENAME, {"problem_id": "unfinished", "seed": 0})
+    write_json(incomplete / META_FILENAME, {"problem_id": "unfinished", "seed": 0})
     with pytest.raises(FileNotFoundError):
         AuditRunner().run(tmp_path, None, None, {})
     assert not any((path / AUDIT_FILENAME).exists() for path in saved_runs)

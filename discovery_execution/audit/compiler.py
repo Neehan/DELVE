@@ -6,7 +6,7 @@ from pathlib import Path
 
 from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
 from discovery_execution.audit.models import AuditRecord
-from discovery_execution.harness.constants import AUDIT_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, RUN_FILENAME
+from discovery_execution.harness.constants import AUDIT_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME
 from discovery_execution.harness.storage import atomic_write
 
 
@@ -31,7 +31,7 @@ class AuditCompiler:
         """Read current per-seed audits and attach the same identity fields used by DE."""
         rows = []
         for path in sorted(self.directory.glob(f"*/seed_*/{AUDIT_FILENAME}")):
-            settings = json.loads((path.parent / RUN_FILENAME).read_text(encoding="utf-8"))
+            settings = json.loads((path.parent / META_FILENAME).read_text(encoding="utf-8"))
             result = json.loads(path.read_text(encoding="utf-8"))
             expected = {f"{k}x" for k in range(1, result["output_tokens"] // OUTPUT_TOKENS_PER_BLOCK + 1)}
             if set(result["checkpoints"]) != expected or result["output_tokens"] % OUTPUT_TOKENS_PER_BLOCK:

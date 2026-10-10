@@ -7,7 +7,7 @@ from discovery_execution.audit.answer_grader import AnswerGrader
 from discovery_execution.audit.compiler import AuditCompiler
 from discovery_execution.dataset import Dataset
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, RUN_FILENAME,
+    AUDIT_FILENAME, CHECKPOINT_FILENAME, META_FILENAME,
 )
 from discovery_execution.harness.storage import Storage, write_json
 from discovery_execution.harness.models import DatasetConfig
@@ -23,10 +23,10 @@ class AuditRunner:
         partitions: dict[tuple[str, str, int], dict[str, str]] = {}
         references: dict[Path, str] = {}
         for path in paths:
-            for filename in (RUN_FILENAME, CHECKPOINT_FILENAME):
+            for filename in (META_FILENAME, CHECKPOINT_FILENAME.format(k=1)):
                 if not (path / filename).is_file():
                     raise FileNotFoundError(path / filename)
-            settings = json.loads((path / RUN_FILENAME).read_text(encoding="utf-8"))
+            settings = json.loads((path / META_FILENAME).read_text(encoding="utf-8"))
             key = (settings["datasets_directory"], settings["competition"], settings["year"])
             if key not in partitions:
                 config = DatasetConfig(datasets_directory=Path(key[0]), competition=key[1], year=key[2],
@@ -49,7 +49,7 @@ class AuditRunner:
         selected = []
         found_problems: set[str] = set()
         found_seeds: set[int] = set()
-        for path in sorted(directory.rglob(RUN_FILENAME)):
+        for path in sorted(directory.rglob(META_FILENAME)):
             metadata = json.loads(path.read_text(encoding="utf-8"))
             if any(metadata[name] != value for name, value in filters.items()):
                 continue
@@ -73,6 +73,6 @@ class AuditRunner:
         """Grade saved snapshots under the seed lock using the dataset's reference answer."""
         with Storage(directory) as storage:
             grader = AnswerGrader(final_answer)
-            settings = storage.read_run()
+            settings = storage.read_metadata()
             result = grader.grade_checkpoints(storage.read_checkpoints(), settings["compute_multiplier_k"])
             write_json(directory / AUDIT_FILENAME, result)

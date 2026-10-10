@@ -47,7 +47,8 @@ async def test_full_trajectory(experiment: str, injection: int, compute_multipli
     directory = root / arm / problem.problem_id / "seed_0"
     state = RunState.model_validate_json(zstandard.decompress((directory / CONVERSATION_FILENAME).read_bytes()))
     assert state.output_tokens == compute_multiplier_k * OUTPUT_TOKENS_PER_BLOCK
-    snapshots = json.loads(zstandard.decompress((directory / CHECKPOINT_FILENAME).read_bytes()))
+    snapshots = [json.loads(zstandard.decompress((directory / CHECKPOINT_FILENAME.format(k=block)).read_bytes()))
+                 for block in range(1, compute_multiplier_k + 1)]
     assert len(snapshots) == compute_multiplier_k
     assert [item.output_tokens for item in state.checkpoints] == [
         block * OUTPUT_TOKENS_PER_BLOCK for block in range(1, compute_multiplier_k + 1)
@@ -306,6 +307,6 @@ async def test_each_trajectory_owns_its_state_and_storage(problem: Problem, loca
         assert item.state.output_tokens == TOTAL_OUTPUT_TOKENS
         assert len(item.state.checkpoints) == TOTAL_BLOCKS
         assert item.problem.statement in item.state.messages[0]["content"]
-        settings = item.storage.read_run()
+        settings = item.storage.read_metadata()
         assert settings["problem_id"] == item.problem.problem_id
         assert not {"problem", "solutions", "prompts", "sketch", "final_answer"} & settings.keys()

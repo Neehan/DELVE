@@ -93,7 +93,7 @@ uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --
 
 Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (Qwen4B: 12, Qwen1.7B: 16, Ministral: 16, DeepSeek: 32), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
-Results go in `output/`, logs in `logs/`. Each trajectory stores `run.json` (settings), `conversation.json.zst` (resume state), `checkpoint.zst` (snapshots), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
+Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 
 On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
 
