@@ -1,3 +1,0 @@
-{"model": "deepseek-r1-distill-qwen-1.5b", "tag": "ds_dp_fp8", "adjacent_repeat_rate": 0.3979, "accuracy": 0.0, "n": 32}
-{"model": "deepseek-r1-distill-qwen-1.5b", "tag": "ds_tp_fp8_orig", "adjacent_repeat_rate": 0.7424, "accuracy": 0.0, "n": 32}
-{"model": "deepseek-r1-distill-qwen-1.5b", "tag": "ds_dp_bf16", "adjacent_repeat_rate": 0.0008, "accuracy": 0.5, "n": 32}

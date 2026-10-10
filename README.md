@@ -85,7 +85,7 @@ Serving uses a 131,072-token context and 92% GPU memory utilization. For long tr
 | Ministral 3B | Tensor, 2 GPUs | FP8 E4M3 | 32 | 632 |
 | DeepSeek 1.5B | Data, 2 replicas | BF16 (`auto`) | 32 | 978 |
 
-Throughput is aggregate across both GPUs in synthetic growing-context workloads up to 70,000 tokens, not a guarantee for every problem. See [benchmark evidence and reproduction](discovery_execution/benchmarks/README.md). DeepSeek's uncalibrated FP8 cache produced severe repetition and failed quality checks, so its FP8 speed results are excluded. Qwen3-1.7B uses fixed [4× YaRN](https://docs.vllm.ai/en/v0.26.0/features/context_extension/); bundled Qwen3-1.7B and DeepSeek templates preserve reasoning.
+Throughput is aggregate across both GPUs in synthetic growing-context workloads up to 70,000 tokens, not a guarantee for every problem. The selected runs reported zero preemptions; reduce `--batch-size` if real jobs encounter sustained preemption. DeepSeek's uncalibrated FP8 cache produced severe repetition and failed quality checks, so its FP8 speed results are excluded. Qwen3-1.7B uses fixed [4× YaRN](https://docs.vllm.ai/en/v0.26.0/features/context_extension/); bundled Qwen3-1.7B and DeepSeek templates preserve reasoning.
 
 Use that same name for `--model`; requests, saved settings, and output folders retain it:
 
