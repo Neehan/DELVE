@@ -82,7 +82,7 @@ Serving uses a 131,072-token context and 92% GPU memory utilization. For long tr
 | --- | --- | --- | ---: | ---: |
 | Qwen3 4B | Tensor, 2 GPUs | FP8 E4M3 | 24 | 450 |
 | Qwen3 1.7B | Tensor, 2 GPUs | FP8 E4M3 | 32 | 615 |
-| Ministral 3B | Tensor, 2 GPUs | BF16 (`auto`) | 16 | Pending validation |
+| Ministral 3B | Tensor, 2 GPUs | BF16 (`auto`) | 16 | 342 |
 | DeepSeek 1.5B | Data, 2 replicas | BF16 (`auto`) | 32 | 978 |
 
 Throughput is aggregate across both GPUs in synthetic growing-context workloads up to 70,000 tokens.
