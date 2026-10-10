@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -16,6 +17,37 @@ from discovery_execution.harness.constants import (
 from discovery_execution.harness.models import BackendConfig, Checkpoint, DatasetConfig, GenerationRequest, Problem, RunConfig, RunState, Solution
 from discovery_execution.harness.openai_client import OpenAIClient
 from discovery_execution.cli.run import backend_configuration, parse_arguments
+
+
+@pytest.fixture
+def hf_upload_api() -> Mock:
+    """Capture upload operations without contacting Hugging Face."""
+    return Mock()
+
+
+@pytest.fixture
+def output_artifacts(tmp_path: Path) -> Path:
+    """Create recognized outputs beside files that must never be uploaded."""
+    root = tmp_path / "output"
+    arm = root / "aime/2024/model/unaided-1x"
+    trajectory = arm / "example/seed_0"
+    trajectory.mkdir(parents=True)
+    for name in ("meta.json", "conversation.json.zst", "checkpoint_1x.json.zst", "audit.json",
+                 ".lock", "tmp123", ".env", "debug.json", "other.json.zst"):
+        (trajectory / name).write_text("test", encoding="utf-8")
+    (arm / "audit.jsonl").write_text("test", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def upload_environment(monkeypatch: pytest.MonkeyPatch, output_artifacts: Path, hf_upload_api: Mock) -> None:
+    """Isolate uploader credentials, output paths, and dotenv loading."""
+    monkeypatch.setenv("HF_DATASETS_REPO", "owner/problems")
+    monkeypatch.setenv("HF_OUTPUTS_REPO", "owner/outputs")
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.load_dotenv", Mock())
+    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.OUTPUT_DIRECTORY", output_artifacts)
+    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.HfApi", Mock(return_value=hf_upload_api))
 
 
 @pytest.fixture

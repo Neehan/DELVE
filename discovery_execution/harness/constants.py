@@ -46,6 +46,10 @@ CHECKPOINT_FILENAME = "checkpoint_{k}x.json.zst"
 CONVERSATION_FILENAME = "conversation.json.zst"
 AUDIT_FILENAME = "audit.json"
 META_FILENAME = "meta.json"
+OUTPUT_UPLOAD_PATTERNS = [
+    f"**/{META_FILENAME}", f"**/{CONVERSATION_FILENAME}",
+    f"**/{CHECKPOINT_FILENAME.format(k='*')}", f"**/{AUDIT_FILENAME}", "**/audit.jsonl",
+]
 SOLVE_PHASE = "solve"
 NEXT_PHASE = {"solve": "critique", "critique": "revise", "revise": "critique"}
 LOCK_FILENAME = ".lock"

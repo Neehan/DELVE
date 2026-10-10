@@ -54,15 +54,16 @@ class Dataset:
         if repository is None or not repository.strip():
             raise FileNotFoundError(
                 f"Dataset partition not found: {self._path}. "
-                "Provide this file or set HF_REPO to download it."
+                "Provide this file or set HF_DATASETS_REPO to download it."
             )
         validate_repo_id(repository)
-        revision = HfApi().dataset_info(repository).sha
+        token = os.environ.get("HF_TOKEN") or None
+        revision = HfApi(token=token).dataset_info(repository).sha
         if revision is None:
             raise ValueError("Hugging Face did not return a dataset commit")
         filename = f"{self._config.competition}/{self._config.year}.jsonl"
         source = Path(hf_hub_download(repo_id=repository, filename=filename,
-                                     repo_type="dataset", revision=revision))
+                                     repo_type="dataset", revision=revision, token=token))
         data = source.read_bytes()
         self._parse(data)
         self._path.parent.mkdir(parents=True, exist_ok=True)

@@ -27,6 +27,20 @@ def test_missing_endpoint_fails(backend_environment: dict[str, str]) -> None:
         backend_configuration(backend_environment)
 
 
+def test_dataset_environment_preserves_saved_settings(run_arguments: list[str],
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the renamed environment variable without changing metadata or saving credentials."""
+    monkeypatch.setenv("HF_DATASETS_REPO", "owner/problems")
+    monkeypatch.setenv("HF_OUTPUTS_REPO", "owner/outputs")
+    monkeypatch.setenv("HF_TOKEN", "test-secret")
+    config = parse_arguments([*run_arguments, "--experiment", "unaided", "--compute-multiplier-k", "1"])
+    settings = config.model_dump(mode="json")
+    assert settings["hf_repo"] == "owner/problems"
+    assert "hf_datasets_repo" not in settings
+    assert "test-secret" not in config.model_dump_json()
+    assert "owner/outputs" not in config.model_dump_json()
+
+
 @pytest.mark.parametrize("model_name", SUPPORTED_MODELS)
 @pytest.mark.parametrize("experiment,injection,compute_multiplier_k", [
     *[(UNAIDED_EXPERIMENT, 0, block) for block in range(1, TOTAL_BLOCKS + 1)],
