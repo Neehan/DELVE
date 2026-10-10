@@ -30,12 +30,13 @@ def parse_arguments(arguments: list[str]) -> RunConfig:
     parser.add_argument("--batch-size", type=int,
                         help=f"Maximum concurrent trajectories (model defaults: {DEFAULT_BATCH_SIZES})")
     args = vars(parser.parse_args(arguments))
-    if args["batch_size"] is None:
-        args["batch_size"] = DEFAULT_BATCH_SIZES[args["model"]]
     if args["compute_multiplier_k"] is None:
         if args["experiment"] == UNAIDED_EXPERIMENT:
             parser.error("unaided requires --compute-multiplier-k")
         args["compute_multiplier_k"] = TOTAL_BLOCKS
+    if args["batch_size"] is None:
+        long_batch, short_batch = DEFAULT_BATCH_SIZES[args["model"]]
+        args["batch_size"] = min(short_batch, long_batch * TOTAL_BLOCKS // args["compute_multiplier_k"])
     try:
         return RunConfig(
             **args, datasets_directory=DATASETS_DIRECTORY, output_directory=OUTPUT_DIRECTORY,
