@@ -72,7 +72,6 @@ class DatasetConfig(BaseModel):
 class RunConfig(DatasetConfig):
     """Validated run selection with a chosen unaided budget or fixed eight-block oracle budget."""
 
-    run_id: str
     output_directory: Path
     model: str
     experiment: Literal["unaided", "oracle-execution"]
@@ -85,8 +84,6 @@ class RunConfig(DatasetConfig):
     @model_validator(mode="after")
     def validate_selection(self) -> "RunConfig":
         """Reject invalid run combinations before reading or generating data."""
-        if not SAFE_COMPONENT.fullmatch(self.run_id):
-            raise ValueError("run-id must be a safe path component")
         if self.model not in SUPPORTED_MODELS:
             raise ValueError(f"unsupported model: {self.model}; choose from {', '.join(SUPPORTED_MODELS)}")
         if not 1 <= self.compute_multiplier_k <= TOTAL_BLOCKS:

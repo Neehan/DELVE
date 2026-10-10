@@ -16,9 +16,10 @@ from discovery_execution.harness.models import DatasetConfig
 class AuditRunner:
     """Run offline grading on a saved output subtree, optionally filtering problem IDs and seeds. No overrides are required."""
 
-    def run(self, directory: Path, problems: list[str] | None, seeds: list[int] | None) -> None:
+    def run(self, directory: Path, problems: list[str] | None, seeds: list[int] | None,
+            filters: dict[str, str | int]) -> None:
         """Validate snapshots and local dataset references before writing any scores."""
-        paths = self._select(directory, problems, seeds)
+        paths = self._select(directory, problems, seeds, filters)
         partitions: dict[tuple[str, str, int], dict[str, str]] = {}
         references: dict[Path, str] = {}
         for path in paths:
@@ -40,7 +41,8 @@ class AuditRunner:
         for arm_directory in sorted({path.parent.parent for path in paths}):
             AuditCompiler(arm_directory).compile()
 
-    def _select(self, directory: Path, problems: list[str] | None, seeds: list[int] | None) -> list[Path]:
+    def _select(self, directory: Path, problems: list[str] | None, seeds: list[int] | None,
+                filters: dict[str, str | int]) -> list[Path]:
         """Filter immutable run metadata and reject empty or unmatched selections."""
         if not directory.is_dir():
             raise NotADirectoryError(directory)
@@ -49,6 +51,8 @@ class AuditRunner:
         found_seeds: set[int] = set()
         for path in sorted(directory.rglob(RUN_FILENAME)):
             metadata = json.loads(path.read_text(encoding="utf-8"))
+            if any(metadata[name] != value for name, value in filters.items()):
+                continue
             problem, seed = metadata["problem_id"], metadata["seed"]
             if problems is not None and problem not in problems:
                 continue

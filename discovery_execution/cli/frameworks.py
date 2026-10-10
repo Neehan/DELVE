@@ -17,7 +17,6 @@ def parse_arguments(arguments: list[str]) -> InputSelection:
     parser.add_argument("--competition", dest="competitions", required=True, nargs="+", choices=COMPETITIONS)
     parser.add_argument("--year", dest="years", required=True, nargs="+", type=int)
     parser.add_argument("--model", required=True, choices=SUPPORTED_MODELS)
-    parser.add_argument("--run-id", required=True)
     parser.add_argument("--frameworks", nargs="+", choices=FRAMEWORK_NAMES, default=list(FRAMEWORK_NAMES))
     try:
         return InputSelection(**vars(parser.parse_args(arguments)))

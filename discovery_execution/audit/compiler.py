@@ -43,7 +43,7 @@ class AuditCompiler:
                 raise ValueError(f"audit identity does not match directory: {path}")
             identity = {
                 "dataset": f"{settings['competition']}/{settings['year']}", "solver_model": settings["model"],
-                **{key: settings[key] for key in ("run_id", "experiment", "compute_multiplier_k", "inject_sketch_at",
+                **{key: settings[key] for key in ("experiment", "compute_multiplier_k", "inject_sketch_at",
                                                  "solution_index", "problem_id", "seed")},
             }
             for label, checkpoint in result["checkpoints"].items():

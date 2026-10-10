@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from discovery_execution.frameworks.utils.constants import FRAMEWORK_NAMES, TOTAL_BUDGET
-from discovery_execution.harness.constants import COMPETITIONS, SAFE_COMPONENT, SUPPORTED_MODELS
+from discovery_execution.harness.constants import COMPETITIONS, SUPPORTED_MODELS
 
 
 @dataclass(frozen=True)
@@ -176,20 +176,19 @@ class Observation:
 
 
 class InputSelection(BaseModel):
-    """Select audited competition/year partitions from one model and run namespace."""
+    """Select audited competition/year partitions from one model."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     model: str
     competitions: list[str]
     years: list[int]
-    run_id: str
     frameworks: list[str]
 
     @model_validator(mode="after")
     def validate_selection(self) -> "InputSelection":
         """Reject unsupported selections, duplicate partitions, and unsafe output paths."""
-        if self.model not in SUPPORTED_MODELS or not SAFE_COMPONENT.fullmatch(self.run_id):
-            raise ValueError("invalid model or run ID")
+        if self.model not in SUPPORTED_MODELS:
+            raise ValueError("invalid model")
         if not self.competitions or len(set(self.competitions)) != len(self.competitions):
             raise ValueError("competitions must be nonempty and unique")
         if any(competition not in COMPETITIONS for competition in self.competitions):

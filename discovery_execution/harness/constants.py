@@ -11,7 +11,7 @@ ENV_FILE = Path(".env")
 OUTPUT_TOKENS_PER_BLOCK = 8192
 TOTAL_BLOCKS = 8
 TOTAL_OUTPUT_TOKENS = OUTPUT_TOKENS_PER_BLOCK * TOTAL_BLOCKS
-MIN_CONTEXT_TOKENS = 70_000
+MIN_CONTEXT_TOKENS = 100_000
 UNAIDED_EXPERIMENT = "unaided"
 ORACLE_EXECUTION_EXPERIMENT = "oracle-execution"
 SEED_MODULUS = 2**31
@@ -21,10 +21,16 @@ SUPPORTED_MODELS = {
     "qwen3-4b-instruct-2507": "Qwen/Qwen3-4B-Instruct-2507",
     "qwen3-1.7b": "Qwen/Qwen3-1.7B",
     "ministral-3-3b-instruct-2512": "mistralai/Ministral-3-3B-Instruct-2512",
+    "deepseek-r1-distill-qwen-1.5b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
 }
-# Require problem and run IDs to be single folder names without separators or traversal paths.
+# Require problem IDs to be single folder names without separators or traversal paths.
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-DEFAULT_BATCH_SIZE = 16
+DEFAULT_BATCH_SIZES = {
+    "qwen3-4b-instruct-2507": 12,
+    "qwen3-1.7b": 16,
+    "ministral-3-3b-instruct-2512": 16,
+    "deepseek-r1-distill-qwen-1.5b": 32,
+}
 DEFAULT_INJECTION = 0
 DEFAULT_SOLUTION_INDEX = 0
 TEMPERATURE = 0.6

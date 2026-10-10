@@ -19,12 +19,21 @@ class AnswerGrader:
             raise ValueError("final_answer cannot be parsed by Math-Verify")
 
     def check(self, text: str) -> bool:
-        """Select the last box before parsing so multiple guesses cannot become a set of answers."""
+        """Isolate the final balanced box so trailing prose cannot override its answer."""
         _, marker, answer = text.rpartition(BOX_MARKER)
-        if not marker:
+        answer = answer.lstrip()
+        if not marker or not answer.startswith("{"):
             return False
-        parsed = self._parse(marker + answer)
-        return bool(parsed) and verify(self._gold, parsed, timeout_seconds=VERIFICATION_TIMEOUT, raise_on_error=True)
+        depth = 0
+        for index, character in enumerate(answer):
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    parsed = self._parse(marker + answer[:index + 1])
+                    return bool(parsed) and verify(self._gold, parsed, timeout_seconds=VERIFICATION_TIMEOUT, raise_on_error=True)
+        return False
 
     def grade_checkpoints(self, snapshots: list[dict[str, Any]], compute_multiplier_k: int) -> dict[str, Any]:
         """Keep raw checkpoint correctness, including regressions after an earlier correct answer."""
