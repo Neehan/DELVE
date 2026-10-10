@@ -110,10 +110,7 @@ After generation and auditing finish, run `bash discovery_execution/scripts/uplo
 On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
 
 ```bash
-mkdir -p logs/slurm
-sbatch discovery_execution/scripts/experiment.sbatch \
-  --model qwen3-1.7b --competition aime --year 2024 \
-  --experiment unaided --compute-multiplier-k 1 --seeds {0..23}
+mkdir -p logs/slurm && sbatch discovery_execution/scripts/experiment.sbatch --model qwen3-1.7b --competition aime --year 2024 --experiment unaided --compute-multiplier-k 1 --seeds {0..23}
 ```
 
 Grades use DE's `correctness.score` field, restricted to 0 or 1. Each checkpoint's last boxed answer is checked with Math-Verify, following [Qwen's final-box convention](https://github.com/QwenLM/Qwen2.5-Math/blob/main/evaluation/parser.py). Missing or unparseable answers score 0. Raw audits preserve regressions; only the framework turns scores `1, 0, 0` into cumulative success `1, 1, 1`.
