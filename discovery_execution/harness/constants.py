@@ -25,11 +25,14 @@ SUPPORTED_MODELS = {
 }
 # Require problem IDs to be single folder names without separators or traversal paths.
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+# (k=8 batch, k=1 batch) tuned on 2x L40S. KV use grows with k, so other budgets scale the k=8
+# batch by 8/k, capped at the k=1 batch. Standalone serving defaults to the k=8 batch;
+# Slurm passes the selected harness batch explicitly to --max-num-seqs.
 DEFAULT_BATCH_SIZES = {
-    "qwen3-4b-instruct-2507": 12,
-    "qwen3-1.7b": 16,
-    "ministral-3-3b-instruct-2512": 16,
-    "deepseek-r1-distill-qwen-1.5b": 32,
+    "qwen3-4b-instruct-2507": (24, 128),
+    "qwen3-1.7b": (32, 128),
+    "ministral-3-3b-instruct-2512": (32, 128),
+    "deepseek-r1-distill-qwen-1.5b": (32, 256),
 }
 DEFAULT_INJECTION = 0
 DEFAULT_SOLUTION_INDEX = 0

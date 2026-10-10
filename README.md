@@ -75,7 +75,16 @@ uv run python -m discovery_execution.vllm.serve --model qwen3-4b-instruct-2507
 
 The server must report at least 100,000 context tokens; long inputs or many refinement turns may require more.
 
-Serving uses a 131,072-token context and FP8 KV cache. Qwen3-1.7B uses fixed [4× YaRN](https://docs.vllm.ai/en/v0.26.0/features/context_extension/); bundled Qwen3-1.7B and DeepSeek templates preserve reasoning. Verify long generation and continuation on the actual server before collection.
+Serving uses a 131,072-token context and 92% GPU memory utilization. For long trajectories on 2× L40S, use:
+
+| Model | Parallelism | KV cache | Batch for 65,536 output tokens | Long-context output tokens/sec |
+| --- | --- | --- | ---: | ---: |
+| Qwen3 4B | Tensor, 2 GPUs | FP8 E4M3 | 24 | 450 |
+| Qwen3 1.7B | Tensor, 2 GPUs | FP8 E4M3 | 32 | 615 |
+| Ministral 3B | Tensor, 2 GPUs | FP8 E4M3 | 32 | 632 |
+| DeepSeek 1.5B | Data, 2 replicas | BF16 (`auto`) | 32 | 978 |
+
+Throughput is aggregate across both GPUs in synthetic growing-context workloads up to 70,000 tokens, not a guarantee for every problem. See [benchmark evidence and reproduction](discovery_execution/benchmarks/README.md). DeepSeek's uncalibrated FP8 cache produced severe repetition and failed quality checks, so its FP8 speed results are excluded. Qwen3-1.7B uses fixed [4× YaRN](https://docs.vllm.ai/en/v0.26.0/features/context_extension/); bundled Qwen3-1.7B and DeepSeek templates preserve reasoning.
 
 Use that same name for `--model`; requests, saved settings, and output folders retain it:
 
@@ -91,7 +100,7 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
 uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --model qwen3-4b-instruct-2507
 ```
 
-Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (Qwen4B: 12, Qwen1.7B: 16, Ministral: 16, DeepSeek: 32), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
+Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (the k=8 defaults are shown above; smaller budgets scale by 8/k, capped at 128 for Qwen/Ministral and 256 for DeepSeek), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 

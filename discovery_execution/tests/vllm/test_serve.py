@@ -6,8 +6,8 @@ import pytest
 from jinja2 import Template
 
 from discovery_execution.cli.run import parse_arguments
-from discovery_execution.harness.constants import SUPPORTED_MODELS
-from discovery_execution.vllm.constants import DEFAULT_PORT, MAX_PORT
+from discovery_execution.harness.constants import DEFAULT_BATCH_SIZES, SUPPORTED_MODELS
+from discovery_execution.vllm.constants import DEFAULT_PORT, KV_CACHE_DTYPE, MAX_PORT, PARALLELISM
 from discovery_execution.vllm.serve import build_command
 
 
@@ -18,9 +18,8 @@ def test_serving_command(model: str) -> None:
     assert command[:3] == ["vllm", "serve", SUPPORTED_MODELS[model]]
     assert command[command.index("--served-model-name") + 1] == model
     assert command[command.index("--max-model-len") + 1] == "131072"
-    assert command[command.index("--kv-cache-dtype") + 1] == "fp8_e4m3"
-    assert "--calculate-kv-scales" in command
-    assert command[command.index("--tensor-parallel-size") + 1] == "2"
+    assert command[command.index("--kv-cache-dtype") + 1] == KV_CACHE_DTYPE[model]
+    assert command[command.index(f"--{PARALLELISM[model]}-parallel-size") + 1] == "2"
     assert not {"--reasoning-parser", "--enable-auto-tool-choice", "--quantization"} & set(command)
     if model == "qwen3-1.7b":
         rope = json.loads(command[command.index("--hf-overrides") + 1])["rope_parameters"]
@@ -39,15 +38,13 @@ def test_invalid_port(port: int) -> None:
         build_command("qwen3-1.7b", port, None)
 
 
-@pytest.mark.parametrize("model,expected", [
-    ("qwen3-4b-instruct-2507", 12), ("qwen3-1.7b", 16),
-    ("ministral-3-3b-instruct-2512", 16), ("deepseek-r1-distill-qwen-1.5b", 32),
-])
+@pytest.mark.parametrize("model", SUPPORTED_MODELS)
 @pytest.mark.parametrize("override", [None, 7])
-def test_concurrency_selection(model: str, expected: int, override: int | None) -> None:
+def test_concurrency_selection(model: str, override: int | None) -> None:
     """Collection and serving share model defaults and honor explicit concurrency."""
     arguments = ["--model", model, "--competition", "aime", "--year", "2024",
-                 "--experiment", "unaided", "--compute-multiplier-k", "1", "--seeds", "0"]
+                 "--experiment", "unaided", "--compute-multiplier-k", "8", "--seeds", "0"]
+    expected = DEFAULT_BATCH_SIZES[model][0]
     if override is not None:
         arguments.extend(["--batch-size", str(override)])
         expected = override
@@ -55,6 +52,19 @@ def test_concurrency_selection(model: str, expected: int, override: int | None) 
     command = build_command(model, DEFAULT_PORT, override)
     assert config.batch_size == expected
     assert command[command.index("--max-num-seqs") + 1] == str(expected)
+
+
+@pytest.mark.parametrize("model", SUPPORTED_MODELS)
+def test_batch_scales_with_budget(model: str) -> None:
+    """Longer budgets hold more KV cache per trajectory, so the default batch shrinks with k."""
+    long_batch, short_batch = DEFAULT_BATCH_SIZES[model]
+    sizes = [parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
+                              "--experiment", "unaided", "--compute-multiplier-k", str(k),
+                              "--seeds", "0"]).batch_size for k in range(1, 9)]
+    oracle = parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
+                              "--experiment", "oracle-execution", "--seeds", "0"])
+    assert sizes[0] == short_batch and sizes[-1] == oracle.batch_size == long_batch
+    assert sizes == sorted(sizes, reverse=True)
 
 
 @pytest.mark.parametrize("concurrency", [0, -1])

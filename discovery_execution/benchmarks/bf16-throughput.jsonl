@@ -1,0 +1,1 @@
+{"tag": "production", "warmup_s": 100, "model": "deepseek-r1-distill-qwen-1.5b", "concurrency": 32, "max_ctx": 70000, "gen_tok_s": 977.7, "prompt_tok_s": 12277.3, "preemptions": 0.0, "avg_running": 31.9, "avg_waiting": 0.0, "avg_kv": 0.764}

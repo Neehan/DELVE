@@ -90,7 +90,8 @@ while true; do
         echo "vLLM exited during startup; see $SERVER_LOG" >&2
         exit 1
     fi
-    if curl --fail --silent --max-time "$POLL_SECONDS" \
+    # System curl breaks when it loads miniforge's libcurl from LD_LIBRARY_PATH.
+    if env -u LD_LIBRARY_PATH curl --fail --silent --max-time "$POLL_SECONDS" \
         -H "Authorization: Bearer $VLLM_API_KEY" "$VLLM_BASE_URL/models" >/dev/null; then
         break
     fi
