@@ -11,32 +11,27 @@ from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 
+from discovery_execution.cli.arguments import add_selection_arguments
 from discovery_execution.harness.runner import Runner
 from discovery_execution.harness.constants import (
-    COMPETITIONS, DATASETS_DIRECTORY, DEFAULT_BATCH_SIZE, DEFAULT_INJECTION, DEFAULT_SOLUTION_INDEX,
-    ENV_FILE, FAILURE_EXIT_CODE, LOG_FORMAT, LOGS_DIRECTORY, OUTPUT_DIRECTORY, SUCCESS_EXIT_CODE, SUPPORTED_MODELS,
-    ORACLE_EXECUTION_EXPERIMENT, TEMPERATURE, TOP_K, TOP_P, TOTAL_BLOCKS, UNAIDED_EXPERIMENT, VLLM_TIMEOUT_SECONDS,
+    DATASETS_DIRECTORY, DEFAULT_BATCH_SIZES, DEFAULT_SOLUTION_INDEX,
+    ENV_FILE, FAILURE_EXIT_CODE, LOG_FORMAT, LOGS_DIRECTORY, OUTPUT_DIRECTORY, SUCCESS_EXIT_CODE,
+    TEMPERATURE, TOP_K, TOP_P, TOTAL_BLOCKS, UNAIDED_EXPERIMENT, VLLM_TIMEOUT_SECONDS,
 )
 from discovery_execution.harness.models import BackendConfig, RunConfig
 from discovery_execution.harness.openai_client import OpenAIClient
 
 
 def parse_arguments(arguments: list[str]) -> RunConfig:
-    """Parse generation selection and validate a non-overwriting run namespace."""
+    """Parse and validate the generation selection."""
     parser = ArgumentParser(allow_abbrev=False)
-    parser.add_argument("--competition", required=True, choices=COMPETITIONS)
-    parser.add_argument("--year", required=True, type=int)
-    parser.add_argument("--model", required=True, choices=SUPPORTED_MODELS)
-    parser.add_argument("--experiment", required=True, choices=(UNAIDED_EXPERIMENT, ORACLE_EXECUTION_EXPERIMENT))
-    parser.add_argument("--compute-multiplier-k", type=int, choices=range(1, TOTAL_BLOCKS + 1),
-                        help="Required for unaided; oracle-execution is fixed at 8")
-    parser.add_argument("--seeds", required=True, type=int, nargs="+")
-    parser.add_argument("--run-id", required=True, help="Frozen configuration namespace, e.g. pilot-v1")
-    parser.add_argument("--inject-sketch-at", type=int, default=DEFAULT_INJECTION)
+    add_selection_arguments(parser, collecting=True)
     parser.add_argument("--solution-index", type=int, default=DEFAULT_SOLUTION_INDEX)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help=f"Maximum concurrent trajectories (default: {DEFAULT_BATCH_SIZE})")
+    parser.add_argument("--batch-size", type=int,
+                        help=f"Maximum concurrent trajectories (model defaults: {DEFAULT_BATCH_SIZES})")
     args = vars(parser.parse_args(arguments))
+    if args["batch_size"] is None:
+        args["batch_size"] = DEFAULT_BATCH_SIZES[args["model"]]
     if args["compute_multiplier_k"] is None:
         if args["experiment"] == UNAIDED_EXPERIMENT:
             parser.error("unaided requires --compute-multiplier-k")
@@ -68,7 +63,7 @@ async def main() -> None:
     LOGS_DIRECTORY.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=[
-        logging.StreamHandler(), logging.FileHandler(LOGS_DIRECTORY / f"{config.run_id}-{timestamp}.log"),
+        logging.StreamHandler(), logging.FileHandler(LOGS_DIRECTORY / f"{config.model}-{timestamp}.log"),
     ])
     try:
         backend_config = backend_configuration(os.environ)

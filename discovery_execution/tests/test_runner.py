@@ -42,7 +42,7 @@ async def test_full_trajectory(experiment: str, injection: int, compute_multipli
     request_count = len(records)
     assert await batch.run()
     assert len(records) == request_count
-    root = config.output_directory / "aime" / "2024" / model_name / config.run_id
+    root = config.output_directory / "aime" / "2024" / model_name
     arm = f"unaided-{compute_multiplier_k}x" if experiment == UNAIDED_EXPERIMENT else f"oracle-at-{injection}x-execution"
     directory = root / arm / problem.problem_id / "seed_0"
     state = RunState.model_validate_json(zstandard.decompress((directory / CONVERSATION_FILENAME).read_bytes()))
@@ -57,7 +57,7 @@ async def test_full_trajectory(experiment: str, injection: int, compute_multipli
     if compute_multiplier_k > 1:
         assert "revise" in {item["phase"] for item in state.requests}
     assert not (directory / AUDIT_FILENAME).exists()
-    AuditRunner().run(root, None, None)
+    AuditRunner().run(root, None, None, {})
     audit = json.loads((directory / AUDIT_FILENAME).read_text(encoding="utf-8"))
     assert audit["complete"] and all(item["correctness"]["score"] == 0 for item in audit["checkpoints"].values())
     assert_intervention(records, experiment, injection, compute_multiplier_k)
@@ -173,6 +173,8 @@ async def test_resume_after_saved_boundary(experiment: str, injection: int, comp
         patch.setattr(Storage, "save", interrupt_after_save)
         assert not await batch.run()
     assert sum(record["count"] for record in records) == OUTPUT_TOKENS_PER_BLOCK
+    # A restarted Slurm server receives a new local port.
+    monkeypatch.setattr(client, "_config", client.configuration.model_copy(update={"base_url": "http://localhost:23456/v1"}))
     assert await batch.run()
     assert_intervention(records, experiment, injection, compute_multiplier_k)
 

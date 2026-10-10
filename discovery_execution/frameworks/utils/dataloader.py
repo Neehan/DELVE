@@ -23,7 +23,7 @@ class DataLoader:
         for competition in selection.competitions:
             for year in selection.years:
                 dataset = f"{competition}/{year}"
-                directory = self.results / dataset / selection.model / selection.run_id
+                directory = self.results / dataset / selection.model
                 short = self._read_runs(directory / SHORT_ARM)
                 oracle = self._read_runs(directory / ORACLE_ARM)
                 for problem in sorted(short.keys() | oracle.keys()):
@@ -51,7 +51,7 @@ class DataLoader:
             for line in handle:
                 row = AuditRecord.model_validate_json(line)
                 arm = f"unaided-{row.compute_multiplier_k}x" if row.experiment == "unaided" else f"oracle-at-{row.inject_sketch_at}x-execution"
-                expected_directory = self.results / row.dataset / row.solver_model / row.run_id / arm
+                expected_directory = self.results / row.dataset / row.solver_model / arm
                 if expected_directory != directory or row.compute_multiplier_k != horizon:
                     raise ValueError(f"audit identity does not match {path}")
                 solution_indices.add(row.solution_index)
@@ -61,7 +61,7 @@ class DataLoader:
                     raise ValueError(f"duplicate audit checkpoint in {path}")
                 run[checkpoint] = row.correctness.score >= MIN_AUDIT_SCORE
         if len(solution_indices) > 1:
-            raise ValueError(f"mixed solution indices in {path}; use separate run IDs")
+            raise ValueError(f"mixed solution indices in {path}")
         expected = set(range(1, horizon + 1))
         complete = {problem: [run for run in seeds.values() if run.keys() == expected]
                     for problem, seeds in runs.items()}

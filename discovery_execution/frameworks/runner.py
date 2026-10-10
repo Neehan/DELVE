@@ -39,9 +39,9 @@ class FrameworkRunner:
             for prediction in framework.predict():
                 grouped.setdefault(prediction.dataset, []).append(prediction)
             for dataset, predictions in grouped.items():
-                directory = self.results / dataset / selection.model / selection.run_id / FRAMEWORKS_DIRECTORY / framework.name
+                directory = self.results / dataset / selection.model / FRAMEWORKS_DIRECTORY / framework.name
                 fitted = {"framework": framework.name, "model": selection.model, "dataset": dataset,
-                          "run_id": selection.run_id, "passing_score": MIN_AUDIT_SCORE,
+                          "passing_score": MIN_AUDIT_SCORE,
                           "fit_datasets": sorted({observation.dataset for observation in observations}),
                           **framework.get_parameters(dataset)}
                 self._save(directory, fitted, predictions)

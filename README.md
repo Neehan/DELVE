@@ -65,46 +65,56 @@ Supported names are defined in `SUPPORTED_MODELS` in `discovery_execution/harnes
 | `qwen3-4b-instruct-2507` | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) |
 | `qwen3-1.7b` | [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) |
 | `ministral-3-3b-instruct-2512` | [mistralai/Ministral-3-3B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512) |
+| `deepseek-r1-distill-qwen-1.5b` | [deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) |
 
-Set vLLM's `--served-model-name` to the matching name, for example:
+With vLLM 0.26.0 installed, start a server on two GPUs:
 
 ```bash
-vllm serve Qwen/Qwen3-4B-Instruct-2507 --served-model-name qwen3-4b-instruct-2507
+uv run python -m discovery_execution.vllm.serve --model qwen3-4b-instruct-2507
 ```
 
-The server must report at least 70,000 context tokens; long inputs or many refinement turns may require more.
+The server must report at least 100,000 context tokens; long inputs or many refinement turns may require more.
 
-For Qwen3-1.7B, configure a [custom vLLM `--chat-template`](https://docs.vllm.ai/en/latest/serving/online_serving/) that preserves assistant text, including unfinished `<think>` blocks; its stock template can insert or remove reasoning tags when continuing saved messages. Keep raw reasoning in `content` by leaving `--reasoning-parser` unset. The custom template is not bundled yet: verify prefix preservation on the actual server before collecting trajectories.
+Serving uses a 131,072-token context and FP8 KV cache. Qwen3-1.7B uses fixed [4× YaRN](https://docs.vllm.ai/en/v0.26.0/features/context_extension/); bundled Qwen3-1.7B and DeepSeek templates preserve reasoning. Verify long generation and continuation on the actual server before collection.
 
 Use that same name for `--model`; requests, saved settings, and output folders retain it:
 
 ```bash
 uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
   --model qwen3-4b-instruct-2507 --experiment unaided --compute-multiplier-k 1 \
-  --seeds {0..23} --run-id pilot
+  --seeds {0..23}
 
 uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
   --model qwen3-4b-instruct-2507 --experiment oracle-execution \
-  --seeds 0 1 2 3 --run-id pilot
+  --seeds 0 1 2 3
 
-uv run python -m discovery_execution.cli.audit --run-dir output/aime/2024/qwen3-4b-instruct-2507/pilot
+uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --model qwen3-4b-instruct-2507
 ```
 
-Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (default 16), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
+Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (Qwen4B: 12, Qwen1.7B: 16, Ministral: 16, DeepSeek: 32), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `run.json` (settings), `conversation.json.zst` (resume state), `checkpoint.zst` (snapshots), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
+
+On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
+
+```bash
+mkdir -p logs/slurm
+sbatch discovery_execution/scripts/experiment.sbatch \
+  --model qwen3-1.7b --competition aime --year 2024 \
+  --experiment unaided --compute-multiplier-k 1 --seeds {0..23}
+```
 
 Grades use DE's `correctness.score` field, restricted to 0 or 1. Each checkpoint's last boxed answer is checked with Math-Verify, following [Qwen's final-box convention](https://github.com/QwenLM/Qwen2.5-Math/blob/main/evaluation/parser.py). Missing or unparseable answers score 0. Raw audits preserve regressions; only the framework turns scores `1, 0, 0` into cumulative success `1, 1, 1`.
 
 **Fit the frameworks**
 
-SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. Fit from audited `unaided-1x` and `oracle-at-0x-execution` arms in the same run namespace:
+SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. Fit from audited `unaided-1x` and `oracle-at-0x-execution` arms under the selected model:
 
 ```bash
 uv run python -m discovery_execution.cli.frameworks --competition aime --year 2024 \
-  --model qwen3-4b-instruct-2507 --run-id pilot
+  --model qwen3-4b-instruct-2507
 ```
 
 Use `--frameworks sg de` to select methods; all four run by default. Fitting requires at least 24 complete short seeds and 3 complete oracle seeds per problem. R-DE additionally needs both first-block successes and later/unsolved oracle outcomes. Long unaided and delayed-sketch arms are excluded from fitting.
 
-Outputs are `frameworks/<method>/fit.json` and `predictions.jsonl` under the model/run directory. Multiple competitions and years select their cross product and share regularized priors. Evaluate forecasts against separately collected unaided 2×–8× arms.
+Outputs are `frameworks/<method>/fit.json` and `predictions.jsonl` under the model directory. Multiple competitions and years select their cross product and share regularized priors. Evaluate forecasts against separately collected unaided 2×–8× arms.

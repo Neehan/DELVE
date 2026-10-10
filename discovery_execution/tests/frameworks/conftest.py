@@ -20,13 +20,13 @@ def selection() -> InputSelection:
     """Select one disposable partition and both unregularized estimators."""
     competition, year = DATASET.split("/")
     return parse_arguments(["--competition", competition, "--year", year, "--model", MODEL,
-                            "--run-id", "test", "--frameworks", "sg", "de"])
+                            "--frameworks", "sg", "de"])
 
 
 @pytest.fixture
-def banks(tmp_path: Path, selection: InputSelection) -> Path:
+def banks(tmp_path: Path) -> Path:
     """Write complete short/oracle observations and deliberately unrelated long/delayed arms."""
-    root = tmp_path / "output" / DATASET / MODEL / selection.run_id
+    root = tmp_path / "output" / DATASET / MODEL
     runs: list[tuple[str, Literal["unaided", "oracle-execution"], int, int]] = [
         (SHORT_ARM, "unaided", 1, 0), (ORACLE_ARM, "oracle-execution", TOTAL_BUDGET, 0),
     ]
@@ -39,7 +39,7 @@ def banks(tmp_path: Path, selection: InputSelection) -> Path:
             for seed in range(trials):
                 for checkpoint in range(1, horizon + 1):
                     count = observation.short_successes if experiment == "unaided" else observation.oracle_successes[checkpoint - 1]
-                    records.append(AuditRecord(dataset=DATASET, solver_model=MODEL, run_id=selection.run_id,
+                    records.append(AuditRecord(dataset=DATASET, solver_model=MODEL,
                                                experiment=experiment, compute_multiplier_k=horizon, inject_sketch_at=injection,
                                                solution_index=0, problem_id=observation.problem_id, seed=seed,
                                                checkpoint_multiplier_k=checkpoint, correctness=BinaryGrade(score=1 if seed < count else 0)))

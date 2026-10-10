@@ -20,7 +20,6 @@ class AuditRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     dataset: str
     solver_model: str
-    run_id: str
     experiment: Literal["unaided", "oracle-execution"]
     compute_multiplier_k: int
     inject_sketch_at: int
@@ -38,8 +37,8 @@ class AuditRecord(BaseModel):
             raise ValueError("invalid audit dataset partition")
         if self.solver_model not in SUPPORTED_MODELS or self.seed < 0:
             raise ValueError("invalid audit model or seed")
-        if not SAFE_COMPONENT.fullmatch(self.run_id) or not SAFE_COMPONENT.fullmatch(self.problem_id):
-            raise ValueError("invalid audit run or problem ID")
+        if not SAFE_COMPONENT.fullmatch(self.problem_id):
+            raise ValueError("invalid audit problem ID")
         if not 1 <= self.checkpoint_multiplier_k <= self.compute_multiplier_k <= TOTAL_BLOCKS:
             raise ValueError("invalid audit checkpoint or compute multiplier")
         if not 0 <= self.inject_sketch_at < TOTAL_BLOCKS or self.solution_index < 0:

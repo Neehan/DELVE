@@ -17,6 +17,11 @@ from discovery_execution.harness.constants import (
 from discovery_execution.harness.models import RunState
 
 
+def model_output_directory(root: Path, competition: str, year: int, model: str) -> Path:
+    """Locate the shared output subtree for one dataset partition and solver."""
+    return root / competition / str(year) / model
+
+
 class Storage:
     """Resume from the conversation; publish separate snapshots for offline auditing."""
 
@@ -36,7 +41,7 @@ class Storage:
         path = self.directory / RUN_FILENAME
         if path.exists():
             if self.read_run() != run_metadata:
-                raise ValueError(f"run configuration differs: {self.directory}; use a new --run-id")
+                raise ValueError(f"run configuration differs: {self.directory}")
         else:
             write_json(path, run_metadata)
 

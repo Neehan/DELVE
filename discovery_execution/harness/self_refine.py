@@ -7,7 +7,7 @@ from discovery_execution.harness.constants import (
 )
 from discovery_execution.harness.models import Checkpoint, GenerationRequest, GenerationResponse, Problem, RunConfig, RunState
 from discovery_execution.harness.openai_client import OpenAIClient
-from discovery_execution.harness.storage import Storage
+from discovery_execution.harness.storage import Storage, model_output_directory
 
 
 class SelfRefine:
@@ -24,8 +24,8 @@ class SelfRefine:
         self.injection_tokens = config.inject_sketch_at * OUTPUT_TOKENS_PER_BLOCK if oracle else None
         self.token_budget = config.compute_multiplier_k * OUTPUT_TOKENS_PER_BLOCK
         self.arm = f"oracle-at-{config.inject_sketch_at}x-execution" if oracle else f"{UNAIDED_EXPERIMENT}-{config.compute_multiplier_k}x"
-        directory = (config.output_directory / config.competition / str(config.year) / config.model
-                     / config.run_id / self.arm / problem.problem_id / f"seed_{seed}")
+        directory = (model_output_directory(config.output_directory, config.competition, config.year, config.model)
+                     / self.arm / problem.problem_id / f"seed_{seed}")
         self.prompts = {
             name: (PROMPTS_DIRECTORY / f"{name}.md").read_text(encoding="utf-8").strip()
             for name in ("solve", "critique", "revise", "sketch")
@@ -39,7 +39,8 @@ class SelfRefine:
             metadata = {
                 **self.config.model_dump(mode="json", exclude={"seeds", "batch_size", "output_directory"}),
                 "problem_id": self.problem.problem_id, "seed": self.seed, "arm": self.arm,
-                "backend": self.client.configuration.model_dump(),
+                # Slurm may restart the same model on a different host or port.
+                "backend": self.client.configuration.model_dump(exclude={"base_url"}),
             }
             self.state = self.storage.load(metadata)
             while self.state.output_tokens < self.token_budget:

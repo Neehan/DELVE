@@ -14,6 +14,11 @@ from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
     ("The answer is 42.", False),
     (r"The answer is $42$.", False),
     (r"\boxed{\frac{84}{2}}", True),
+    (r"\boxed{} The final answer is $42$.", False),
+    (r"\boxed{0} The final answer is $42$. I hope", False),
+    (r"\boxed{42} The final answer is $0$. I hope", True),
+    (r"\boxed{42} then \boxed{}", False),
+    (r"\boxed{\frac{84}{2}} followed by $0$.", True),
 ])
 def test_final_box_only(text: str, expected: bool) -> None:
     """Ignore earlier guesses and require a parsable final boxed answer."""

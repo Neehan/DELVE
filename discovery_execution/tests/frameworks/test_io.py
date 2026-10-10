@@ -22,7 +22,7 @@ def test_loader_uses_all_complete_seeds(data_loader: DataLoader, selection: Inpu
 
 def test_framework_retains_earlier_success(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Convert raw checkpoint regressions to cumulative counts without changing the audit file."""
-    path = banks / DATASET / MODEL / selection.run_id / ORACLE_ARM / COMPILED_AUDIT_FILENAME
+    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     for row in rows:
         if row["problem_id"] == "p1" and row["seed"] == 0 and row["checkpoint_multiplier_k"] > 1:
@@ -34,13 +34,13 @@ def test_framework_retains_earlier_success(banks: Path, data_loader: DataLoader,
 
 
 @pytest.mark.parametrize("field,value", [
-    ("run_id", "other"), ("solver_model", "qwen3-1.7b"), ("dataset", "aime/2025"),
+    ("solver_model", "qwen3-1.7b"), ("dataset", "aime/2025"),
     ("inject_sketch_at", 7), ("compute_multiplier_k", 7), ("correctness", {"score": 7}),
 ])
 def test_loader_rejects_wrong_identity_or_nonbinary_grade(field: str, value: object, banks: Path,
                                                           data_loader: DataLoader, selection: InputSelection) -> None:
     """Misplaced or malformed oracle rows cannot silently change the execution estimate."""
-    path = banks / DATASET / MODEL / selection.run_id / ORACLE_ARM / COMPILED_AUDIT_FILENAME
+    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     rows[0][field] = value
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -50,7 +50,7 @@ def test_loader_rejects_wrong_identity_or_nonbinary_grade(field: str, value: obj
 
 def test_loader_rejects_duplicates(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Duplicate checkpoint rows must not double-count successful seeds."""
-    path = banks / DATASET / MODEL / selection.run_id / SHORT_ARM / COMPILED_AUDIT_FILENAME
+    path = banks / DATASET / MODEL / SHORT_ARM / COMPILED_AUDIT_FILENAME
     with path.open("a") as handle:
         handle.write(path.read_text().splitlines()[0] + "\n")
     with pytest.raises(ValueError, match="duplicate"):
@@ -59,7 +59,7 @@ def test_loader_rejects_duplicates(banks: Path, data_loader: DataLoader, selecti
 
 def test_incomplete_seed_is_excluded(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """A partially audited oracle seed is neither a success nor a failure observation."""
-    path = banks / DATASET / MODEL / selection.run_id / ORACLE_ARM / COMPILED_AUDIT_FILENAME
+    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     rows = [row for row in rows if not (row["problem_id"] == "p1" and row["seed"] == 0
                                        and row["checkpoint_multiplier_k"] == TOTAL_BUDGET)]
@@ -71,17 +71,17 @@ def test_incomplete_seed_is_excluded(banks: Path, data_loader: DataLoader, selec
 
 def test_missing_arm_fails(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Missing fitting data is an explicit error instead of a fallback to another arm."""
-    missing = selection.model_copy(update={"run_id": "missing"})
+    missing = selection.model_copy(update={"years": [2025]})
     with pytest.raises(FileNotFoundError):
         data_loader.load(missing)
 
 
 def test_framework_outputs(runner: FrameworkRunner, selection: InputSelection, banks: Path) -> None:
-    """Persist parameters and the original DE allocation grid beneath each partition's run ID."""
+    """Persist parameters and the original DE allocation grid beneath each partition and model."""
     directories = runner.run(selection)
     assert {path.name for path in directories} == {"sg", "de"}
     for directory in directories:
-        assert directory.parent == banks / DATASET / MODEL / selection.run_id / "frameworks"
+        assert directory.parent == banks / DATASET / MODEL / "frameworks"
         fitted = json.loads((directory / FIT_FILENAME).read_text())
         assert fitted["passing_score"] == 1
         assert set(fitted["parameters"]) == {row.problem_id for row in ROWS}
@@ -95,6 +95,6 @@ def test_framework_outputs(runner: FrameworkRunner, selection: InputSelection, b
 def test_cli_selects_competition_year_cross_product() -> None:
     """Explicit partition lists support joint prior fitting without domain or state-audit filters."""
     selection = parse_arguments(["--competition", "aime", "hmmt", "--year", "2024", "2025",
-                                 "--model", MODEL, "--run-id", "test"])
+                                 "--model", MODEL])
     assert selection.competitions == ["aime", "hmmt"] and selection.years == [2024, 2025]
     assert selection.frameworks == ["sg", "de", "r-sg", "r-de"]

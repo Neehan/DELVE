@@ -1,0 +1,16 @@
+{# Restore the fixed generation prefix before saved outputs; never strip reasoning. #}
+{{- bos_token }}
+{%- for message in messages %}
+    {%- if message.role == 'system' and loop.first %}
+        {{- message.content }}
+    {%- elif message.role == 'user' %}
+        {{- '<｜User｜>' + message.content }}
+    {%- elif message.role == 'assistant' %}
+        {{- '<｜Assistant｜><think>\n' + message.content + '<｜end▁of▁sentence｜>' }}
+    {%- else %}
+        {{- raise_exception('Only an initial system message and user/assistant messages are supported') }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<｜Assistant｜><think>\n' }}
+{%- endif %}

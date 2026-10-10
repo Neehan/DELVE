@@ -77,7 +77,7 @@ def context_tokens() -> int:
 def run_arguments(dataset_config: DatasetConfig, model_name: str) -> list[str]:
     """Supply shared CLI identity arguments without selecting an arm or budget."""
     return ["--competition", dataset_config.competition, "--year", str(dataset_config.year),
-            "--model", model_name, "--seeds", "0", "--run-id", "test"]
+            "--model", model_name, "--seeds", "0"]
 
 
 @pytest.fixture
