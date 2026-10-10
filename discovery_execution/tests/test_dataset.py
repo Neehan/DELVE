@@ -18,6 +18,7 @@ def download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: Problem) 
     source.write_text(problem.model_dump_json() + "\n", encoding="utf-8")
     api = Mock()
     api.dataset_info.return_value.sha = "pinned-commit"
+    monkeypatch.setenv("HF_TOKEN", "test-token")
     downloader = Mock(return_value=str(source))
     monkeypatch.setattr("discovery_execution.dataset.HfApi", Mock(return_value=api))
     monkeypatch.setattr("discovery_execution.dataset.hf_hub_download", downloader)
@@ -32,7 +33,7 @@ def test_download_once_then_iterate_locally(dataset_config: DatasetConfig, downl
     reloaded = Dataset(dataset_config.model_copy(update={"hf_repo": None}))
     assert list(reloaded) == list(dataset)
     download.assert_called_once_with(repo_id="owner/repo", filename="aime/2024.jsonl",
-                                     repo_type="dataset", revision="pinned-commit")
+                                     repo_type="dataset", revision="pinned-commit", token="test-token")
 
 
 def test_invalid_download_is_not_installed(dataset_config: DatasetConfig, download: Mock) -> None:
@@ -106,7 +107,7 @@ def test_missing_dataset_requires_repository(dataset_config: DatasetConfig, down
     """Reject missing data with no repository before any Hugging Face call."""
     api = Mock()
     monkeypatch.setattr("discovery_execution.dataset.HfApi", api)
-    with pytest.raises(FileNotFoundError, match="HF_REPO") as error:
+    with pytest.raises(FileNotFoundError, match="HF_DATASETS_REPO") as error:
         Dataset(dataset_config.model_copy(update={"hf_repo": repository}))
     assert str(dataset_config.datasets_directory / "aime" / "2024.jsonl") in str(error.value)
     api.assert_not_called()
