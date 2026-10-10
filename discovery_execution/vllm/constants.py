@@ -12,7 +12,7 @@ GPU_MEMORY_UTILIZATION = 0.92
 KV_CACHE_DTYPE = {
     "qwen3-4b-instruct-2507": "fp8_e4m3",
     "qwen3-1.7b": "fp8_e4m3",
-    "ministral-3-3b-instruct-2512": "fp8_e4m3",
+    "ministral-3-3b-instruct-2512": "auto",
     # Uncalibrated FP8 caused severe repetition in the AIME quality checks.
     "deepseek-r1-distill-qwen-1.5b": "auto",
 }

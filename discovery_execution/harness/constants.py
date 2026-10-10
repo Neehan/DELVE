@@ -31,7 +31,7 @@ SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 DEFAULT_BATCH_SIZES = {
     "qwen3-4b-instruct-2507": (24, 128),
     "qwen3-1.7b": (32, 128),
-    "ministral-3-3b-instruct-2512": (32, 128),
+    "ministral-3-3b-instruct-2512": (16, 128),
     "deepseek-r1-distill-qwen-1.5b": (32, 256),
 }
 DEFAULT_INJECTION = 0
