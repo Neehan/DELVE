@@ -59,7 +59,7 @@ class DatasetConfig(BaseModel):
     competition: str
     year: int
     datasets_directory: Path
-    dataset_repo_url: str | None
+    hf_repo: str | None
 
     @model_validator(mode="after")
     def validate_partition(self) -> "DatasetConfig":

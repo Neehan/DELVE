@@ -39,7 +39,7 @@ def parse_arguments(arguments: list[str]) -> RunConfig:
     try:
         return RunConfig(
             **args, datasets_directory=DATASETS_DIRECTORY, output_directory=OUTPUT_DIRECTORY,
-            dataset_repo_url=os.environ.get("HF_DATASET_REPO_URL"),
+            hf_repo=os.environ.get("HF_REPO"),
         )
     except ValueError as error:
         parser.error(str(error))

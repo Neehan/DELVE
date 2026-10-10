@@ -29,7 +29,7 @@ def test_download_once_then_iterate_locally(dataset_config: DatasetConfig, downl
     dataset = Dataset(dataset_config)
     assert [problem.problem_id for problem in dataset] == ["example"]
     assert list(dataset) == list(dataset)
-    reloaded = Dataset(dataset_config.model_copy(update={"dataset_repo_url": None}))
+    reloaded = Dataset(dataset_config.model_copy(update={"hf_repo": None}))
     assert list(reloaded) == list(dataset)
     download.assert_called_once_with(repo_id="owner/repo", filename="aime/2024.jsonl",
                                      repo_type="dataset", revision="pinned-commit")
@@ -100,15 +100,27 @@ def test_concurrent_install_preserves_existing_partition(dataset_config: Dataset
     assert list(path.parent.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("url", [None, "", "   "])
+@pytest.mark.parametrize("repository", [None, "", "   "])
 def test_missing_dataset_requires_repository(dataset_config: DatasetConfig, download: Mock,
-                                             monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
+                                             monkeypatch: pytest.MonkeyPatch, repository: str | None) -> None:
     """Reject missing data with no repository before any Hugging Face call."""
     api = Mock()
     monkeypatch.setattr("discovery_execution.dataset.HfApi", api)
-    with pytest.raises(FileNotFoundError, match="HF_DATASET_REPO_URL") as error:
-        Dataset(dataset_config.model_copy(update={"dataset_repo_url": url}))
+    with pytest.raises(FileNotFoundError, match="HF_REPO") as error:
+        Dataset(dataset_config.model_copy(update={"hf_repo": repository}))
     assert str(dataset_config.datasets_directory / "aime" / "2024.jsonl") in str(error.value)
+    api.assert_not_called()
+    download.assert_not_called()
+
+
+@pytest.mark.parametrize("repository", ["https://huggingface.co/datasets/owner/repo", "owner/repo/file", "owner/bad..name"])
+def test_invalid_repository_fails_before_download(dataset_config: DatasetConfig, download: Mock,
+                                                 monkeypatch: pytest.MonkeyPatch, repository: str) -> None:
+    """Accept HF repository IDs rather than URLs or paths, validating before network access."""
+    api = Mock()
+    monkeypatch.setattr("discovery_execution.dataset.HfApi", api)
+    with pytest.raises(ValueError):
+        Dataset(dataset_config.model_copy(update={"hf_repo": repository}))
     api.assert_not_called()
     download.assert_not_called()
 

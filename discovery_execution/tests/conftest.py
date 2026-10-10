@@ -43,7 +43,7 @@ def dataset_config(tmp_path: Path, problem: Problem) -> DatasetConfig:
     """Point a single partition at a fresh temporary directory."""
     return DatasetConfig(competition=problem.competition, year=problem.year,
                          datasets_directory=tmp_path / "datasets",
-                         dataset_repo_url="https://huggingface.co/datasets/owner/repo")
+                         hf_repo="owner/repo")
 
 
 @pytest.fixture

@@ -5,9 +5,9 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from urllib.parse import urlsplit
 
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils._validators import validate_repo_id
 
 from discovery_execution.harness.models import DatasetConfig, Problem
 
@@ -50,13 +50,13 @@ class Dataset:
 
     def _download(self) -> None:
         """Validate a pinned HF download before installing it without replacing local data."""
-        url = self._config.dataset_repo_url
-        if url is None or not url.strip():
+        repository = self._config.hf_repo
+        if repository is None or not repository.strip():
             raise FileNotFoundError(
                 f"Dataset partition not found: {self._path}. "
-                "Provide this file or set HF_DATASET_REPO_URL to download it."
+                "Provide this file or set HF_REPO to download it."
             )
-        repository = repository_id(url)
+        validate_repo_id(repository)
         revision = HfApi().dataset_info(repository).sha
         if revision is None:
             raise ValueError("Hugging Face did not return a dataset commit")
@@ -78,14 +78,3 @@ class Dataset:
             os.fsync(handle.fileno())
             # A hard link publishes the complete file and fails if another writer created the destination.
             os.link(handle.name, path)
-
-
-def repository_id(url: str) -> str:
-    """Require a dataset repository URL without file paths or embedded credentials."""
-    parsed = urlsplit(url)
-    parts = parsed.path.strip("/").split("/")
-    if parsed.scheme != "https" or parsed.netloc != "huggingface.co" or parsed.query or parsed.fragment:
-        raise ValueError("HF_DATASET_REPO_URL must be https://huggingface.co/datasets/owner/repo")
-    if len(parts) != 3 or parts[0] != "datasets" or not all(parts):
-        raise ValueError("HF_DATASET_REPO_URL must identify a dataset repository")
-    return "/".join(parts[1:])

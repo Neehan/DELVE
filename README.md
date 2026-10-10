@@ -10,12 +10,12 @@ Run commands from the repository root. Copy `.env.example` to `.env` and configu
 
 ```dotenv
 VLLM_BASE_URL=http://localhost:8000/v1
-HF_DATASET_REPO_URL=https://huggingface.co/datasets/owner/repo
+HF_REPO=notadib/DELVE-Datasets
 # VLLM_API_KEY=...  # Only for an authenticated model server.
 # HF_TOKEN=...      # Only for a private dataset repository.
 ```
 
-The endpoint must end in `/v1`. The HF URL is needed only for partitions missing locally. Sampling and timeout settings live in `discovery_execution/harness/constants.py`.
+The endpoint must end in `/v1`. The HF repository ID is needed only for partitions missing locally. Sampling and timeout settings live in `discovery_execution/harness/constants.py`.
 
 **Dataset**
 

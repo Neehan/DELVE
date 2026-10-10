@@ -30,7 +30,7 @@ class AuditRunner:
             key = (settings["datasets_directory"], settings["competition"], settings["year"])
             if key not in partitions:
                 config = DatasetConfig(datasets_directory=Path(key[0]), competition=key[1], year=key[2],
-                                       dataset_repo_url=None)
+                                       hf_repo=None)
                 partitions[key] = {problem.problem_id: problem.final_answer for problem in Dataset(config)}
             problem_id = settings["problem_id"]
             if problem_id not in partitions[key]:
