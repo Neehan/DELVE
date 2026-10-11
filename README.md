@@ -28,7 +28,7 @@ aime/2025.jsonl
 hmmt/2026.jsonl
 ```
 
-Competitions are `aime`, `hmmt`, `brumo`, and `smt`; any positive year is accepted. Requested partitions are cached under `data/datasets/` with the same layout.
+Competitions are `aime`, `hmmt`, `brumo`, `smt`, `bmt`, and `cmimc`; any positive year is accepted. Requested partitions are cached under `data/datasets/` with the same layout.
 
 Each file contains one problem object per line. This toy example is expanded for readability:
 

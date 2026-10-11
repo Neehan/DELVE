@@ -15,7 +15,7 @@ MIN_CONTEXT_TOKENS = 100_000
 UNAIDED_EXPERIMENT = "unaided"
 ORACLE_EXECUTION_EXPERIMENT = "oracle-execution"
 SEED_MODULUS = 2**31
-COMPETITIONS = ("aime", "hmmt", "brumo", "smt")
+COMPETITIONS = ("aime", "hmmt", "brumo", "smt", "bmt", "cmimc")
 # CLI and vLLM served names mapped to their Hugging Face model repositories.
 SUPPORTED_MODELS = {
     "qwen3-4b-instruct-2507": "Qwen/Qwen3-4B-Instruct-2507",
