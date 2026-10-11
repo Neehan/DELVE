@@ -1,4 +1,4 @@
-You are now given the following strategy sketch. Use it to find a complete solution, checking the details and calculations yourself. Give your final answer in \boxed{}.
+The following sketch describes a valid sketch from a verified solution. Trust it and follow it to solve the problem.
 
 Sketch:
 {sketch}
