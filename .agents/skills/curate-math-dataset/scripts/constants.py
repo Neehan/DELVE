@@ -1,4 +1,4 @@
 """Fixed sketch-length limits for DELVE dataset curation."""
 
-MIN_SKETCH_WORDS = 12
-MAX_SKETCH_WORDS = 15
+MIN_SKETCH_WORDS = 22
+MAX_SKETCH_WORDS = 25
