@@ -9,8 +9,10 @@ import pytest
 import zstandard
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, GENERATION_RETRY_DELAYS, MIN_CONTEXT_TOKENS, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, SUPPORTED_MODELS, TOTAL_BLOCKS, TOTAL_OUTPUT_TOKENS, UNAIDED_EXPERIMENT,
+    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, GENERATION_RETRY_DELAYS, META_FILENAME, MIN_CONTEXT_TOKENS, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, SUPPORTED_MODELS, TOTAL_BLOCKS, TOTAL_OUTPUT_TOKENS, UNAIDED_EXPERIMENT,
 )
+from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
+from discovery_execution.audit.models import AuditRecord
 from discovery_execution.harness.models import GenerationRequest, GenerationResponse, Problem, RunConfig, RunState
 from discovery_execution.harness.openai_client import OpenAIClient
 from discovery_execution.harness.storage import Storage
@@ -164,6 +166,90 @@ async def test_missing_sketch_fails_before_requests(make_run_config: Callable[[s
         await batch.run()
     assert not records
     assert not config.output_directory.exists()
+
+
+@pytest.mark.parametrize("injection", [0, 3, 7])
+async def test_round_robin_sketch_selection(injection: int, multiple_solution_problem: Problem,
+                                          make_run_config: Callable[[str, int], RunConfig],
+                                          client: OpenAIClient) -> None:
+    """Cycle sketches by seed, retaining that choice at each injection time and in exported audits."""
+    config = make_run_config(ORACLE_EXECUTION_EXPERIMENT, injection)
+    config = config.model_copy(update={"seeds": list(range(2 * len(multiple_solution_problem.solutions)))})
+    assert config.solution_index is None
+    assert await Runner(config, client).run()
+    for path in config.output_directory.rglob(META_FILENAME):
+        settings = json.loads(path.read_text())
+        expected = settings["seed"] % len(multiple_solution_problem.solutions)
+        assert settings["solution_index"] == expected
+        for block in range(1, TOTAL_BLOCKS + 1):
+            snapshot = json.loads(zstandard.decompress((path.parent / CHECKPOINT_FILENAME.format(k=block)).read_bytes()))
+            text = "\n".join(message["content"] for message in snapshot["messages"])
+            for index, solution in enumerate(multiple_solution_problem.solutions):
+                assert text.count(solution.sketch) == int(block > injection and index == expected)
+            assert "PRIVATE_REFERENCE" not in text
+    AuditRunner().run(config.output_directory, None, None, {})
+    compiled, = config.output_directory.rglob(COMPILED_AUDIT_FILENAME)
+    audits = [AuditRecord.model_validate_json(line) for line in compiled.read_text().splitlines()]
+    assert len(audits) == len(config.seeds) * TOTAL_BLOCKS
+    assert all(row.solution_index == row.seed % len(multiple_solution_problem.solutions) for row in audits)
+
+
+async def test_explicit_sketch_selection_overrides_round_robin(multiple_solution_problem: Problem,
+                                                             make_run_config: Callable[[str, int], RunConfig],
+                                                             client: OpenAIClient) -> None:
+    """An explicit index selects the same sketch even for seeds mapping to another solution."""
+    config = make_run_config(ORACLE_EXECUTION_EXPERIMENT, 0).model_copy(update={"solution_index": 1})
+    assert await Runner(config, client).run()
+    path, = config.output_directory.rglob(META_FILENAME)
+    assert json.loads(path.read_text())["solution_index"] == config.solution_index
+    state = RunState.model_validate_json(zstandard.decompress((path.parent / CONVERSATION_FILENAME).read_bytes()))
+    text = "\n".join(message["content"] for message in state.messages)
+    assert text.count(multiple_solution_problem.solutions[1].sketch) == 1
+    assert multiple_solution_problem.solutions[0].sketch not in text
+
+
+async def test_default_selection_resumes_recorded_sketch(multiple_solution_problem: Problem,
+                                                       make_run_config: Callable[[str, int], RunConfig],
+                                                       client: OpenAIClient, records: list[dict[str, Any]],
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume the recorded sketch when the initial run used an explicit selection."""
+    config = make_run_config(ORACLE_EXECUTION_EXPERIMENT, 1)
+    explicit = config.model_copy(update={"solution_index": 1})
+    original_save = Storage.save
+
+    def interrupt_after_save(storage: Storage, state: RunState) -> None:
+        """Stop before delayed injection after the selected index is durably recorded."""
+        original_save(storage, state)
+        if state.output_tokens == OUTPUT_TOKENS_PER_BLOCK:
+            raise RuntimeError("simulated interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Storage, "save", interrupt_after_save)
+        assert not await Runner(explicit, client).run()
+    assert await Runner(config, client).run()
+    path, = config.output_directory.rglob(META_FILENAME)
+    assert json.loads(path.read_text())["solution_index"] == 1
+    state = RunState.model_validate_json(zstandard.decompress((path.parent / CONVERSATION_FILENAME).read_bytes()))
+    text = "\n".join(message["content"] for message in state.messages)
+    assert text.count(multiple_solution_problem.solutions[1].sketch) == 1
+    assert multiple_solution_problem.solutions[0].sketch not in text
+    count = len(records)
+    assert await Runner(config, client).run()
+    assert len(records) == count
+    with pytest.raises(ValueError, match="run configuration differs"):
+        await SelfRefine(config.model_copy(update={"solution_index": 0}), multiple_solution_problem, 0, client).run()
+    assert len(records) == count
+
+
+@pytest.mark.parametrize("index", [0, 1, -1])
+def test_cli_explicit_solution_index(index: int, run_arguments: list[str]) -> None:
+    """Accept explicit oracle indices, including zero, and reject negatives before generation."""
+    arguments = [*run_arguments, "--experiment", ORACLE_EXECUTION_EXPERIMENT, "--solution-index", str(index)]
+    if index < 0:
+        with pytest.raises(SystemExit):
+            parse_arguments(arguments)
+    else:
+        assert parse_arguments(arguments).solution_index == index
 
 
 @pytest.mark.parametrize("experiment,injection,compute_multiplier_k", [

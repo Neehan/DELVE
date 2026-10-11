@@ -88,6 +88,18 @@ def local_partition(dataset_config: DatasetConfig, problem: Problem) -> Path:
 
 
 @pytest.fixture
+def multiple_solution_problem(problem: Problem, local_partition: Path) -> Problem:
+    """Provide distinguishable checked sketches for testing selection and reference isolation."""
+    solutions = [problem.solutions[0], *[
+        problem.solutions[0].model_copy(update={"sketch": marker})
+        for marker in ("ALTERNATE_SKETCH", "THIRD_SKETCH")
+    ]]
+    selected = problem.model_copy(update={"solutions": solutions})
+    local_partition.write_text(selected.model_dump_json() + "\n", encoding="utf-8")
+    return selected
+
+
+@pytest.fixture
 def model_name() -> str:
     """Use the same supported name for CLI selection and the mock model server."""
     return "qwen3-4b-instruct-2507"

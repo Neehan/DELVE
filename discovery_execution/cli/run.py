@@ -26,7 +26,8 @@ def parse_arguments(arguments: list[str]) -> RunConfig:
     """Parse and validate the generation selection."""
     parser = ArgumentParser(allow_abbrev=False)
     add_selection_arguments(parser, collecting=True)
-    parser.add_argument("--solution-index", type=int, default=DEFAULT_SOLUTION_INDEX)
+    parser.add_argument("--solution-index", type=int, default=DEFAULT_SOLUTION_INDEX,
+                        help="Oracle solution index; defaults to seed modulo the problem's solution count")
     parser.add_argument("--batch-size", type=int,
                         help=f"Maximum concurrent trajectories (model defaults: {DEFAULT_BATCH_SIZES})")
     args = vars(parser.parse_args(arguments))

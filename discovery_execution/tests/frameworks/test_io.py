@@ -20,6 +20,27 @@ def test_loader_uses_all_complete_seeds(data_loader: DataLoader, selection: Inpu
     assert [asdict(row) for row in data_loader.load(selection)] == [asdict(row) for row in ROWS]
 
 
+def test_loader_pools_solution_mixtures(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
+    """Different seeds and problems can use different sketches without losing audited outcomes."""
+    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        row["solution_index"] = row["seed"] % 3
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert [asdict(row) for row in data_loader.load(selection)] == [asdict(row) for row in ROWS]
+
+
+def test_loader_rejects_changed_sketch_within_trajectory(banks: Path, data_loader: DataLoader,
+                                                       selection: InputSelection) -> None:
+    """A trajectory must retain one selected sketch across all checkpoint rows."""
+    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["solution_index"] = 1
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(ValueError, match="solution index changes within a trajectory"):
+        data_loader.load(selection)
+
+
 def test_framework_retains_earlier_success(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Convert raw checkpoint regressions to cumulative counts without changing the audit file."""
     path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME

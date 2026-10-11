@@ -46,7 +46,7 @@ class DataLoader:
         horizon = 1 if directory.name == SHORT_ARM else TOTAL_BUDGET
         path = directory / COMPILED_AUDIT_FILENAME
         runs: dict[str, dict[int, dict[int, bool]]] = {}
-        solution_indices = set()
+        solution_indices: dict[tuple[str, int], int] = {}
         with path.open(encoding="utf-8") as handle:
             for line in handle:
                 row = AuditRecord.model_validate_json(line)
@@ -54,14 +54,14 @@ class DataLoader:
                 expected_directory = self.results / row.dataset / row.solver_model / arm
                 if expected_directory != directory or row.compute_multiplier_k != horizon:
                     raise ValueError(f"audit identity does not match {path}")
-                solution_indices.add(row.solution_index)
+                identity = (row.problem_id, row.seed)
+                if solution_indices.setdefault(identity, row.solution_index) != row.solution_index:
+                    raise ValueError(f"solution index changes within a trajectory in {path}")
                 checkpoint = row.checkpoint_multiplier_k
                 run = runs.setdefault(row.problem_id, {}).setdefault(row.seed, {})
                 if checkpoint in run:
                     raise ValueError(f"duplicate audit checkpoint in {path}")
                 run[checkpoint] = row.correctness.score >= MIN_AUDIT_SCORE
-        if len(solution_indices) > 1:
-            raise ValueError(f"mixed solution indices in {path}")
         expected = set(range(1, horizon + 1))
         complete = {problem: [run for run in seeds.values() if run.keys() == expected]
                     for problem, seeds in runs.items()}

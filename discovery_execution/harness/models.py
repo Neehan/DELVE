@@ -77,7 +77,7 @@ class RunConfig(DatasetConfig):
     experiment: Literal["unaided", "oracle-execution"]
     compute_multiplier_k: int
     inject_sketch_at: int
-    solution_index: int
+    solution_index: int | None
     seeds: list[int]
     batch_size: int
 
@@ -92,7 +92,7 @@ class RunConfig(DatasetConfig):
             raise ValueError("oracle-execution requires compute-multiplier-k=8")
         if not 0 <= self.inject_sketch_at < TOTAL_BLOCKS:
             raise ValueError("injection must be 0..7")
-        if self.solution_index < 0:
+        if self.solution_index is not None and self.solution_index < 0:
             raise ValueError("solution index must be nonnegative")
         if self.batch_size < 1:
             raise ValueError("batch size must be positive")

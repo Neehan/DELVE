@@ -3,7 +3,7 @@
 import hashlib
 
 from discovery_execution.harness.constants import (
-    NEXT_PHASE, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, PROMPTS_DIRECTORY, UNAIDED_EXPERIMENT, SEED_MODULUS, SOLVE_PHASE,
+    META_FILENAME, NEXT_PHASE, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, PROMPTS_DIRECTORY, UNAIDED_EXPERIMENT, UNAIDED_SOLUTION_INDEX, SEED_MODULUS, SOLVE_PHASE,
 )
 from discovery_execution.harness.models import Checkpoint, GenerationRequest, GenerationResponse, Problem, RunConfig, RunState
 from discovery_execution.harness.openai_client import OpenAIClient
@@ -20,7 +20,7 @@ class SelfRefine:
         self.seed = seed
         self.client = client
         oracle = config.experiment == ORACLE_EXECUTION_EXPERIMENT
-        self.sketch = problem.solutions[config.solution_index].sketch if oracle else None
+        self.sketch: str | None = None
         self.injection_tokens = config.inject_sketch_at * OUTPUT_TOKENS_PER_BLOCK if oracle else None
         self.token_budget = config.compute_multiplier_k * OUTPUT_TOKENS_PER_BLOCK
         self.arm = f"oracle-at-{config.inject_sketch_at}x-execution" if oracle else f"{UNAIDED_EXPERIMENT}-{config.compute_multiplier_k}x"
@@ -36,8 +36,19 @@ class SelfRefine:
     async def run(self) -> None:
         """Load progress, then prepare, generate, update, and save until the budget is exhausted."""
         with self.storage:
+            oracle = self.config.experiment == ORACLE_EXECUTION_EXPERIMENT
+            solution_index = self.config.solution_index
+            if solution_index is None:
+                solution_index = self.seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
+                if (self.storage.directory / META_FILENAME).exists():
+                    solution_index = self.storage.read_metadata()["solution_index"]
+            if oracle:
+                if not 0 <= solution_index < len(self.problem.solutions):
+                    raise ValueError(f"missing solution index for {self.problem.problem_id}")
+                self.sketch = self.problem.solutions[solution_index].sketch
             metadata = {
                 **self.config.model_dump(mode="json", exclude={"seeds", "batch_size", "output_directory"}),
+                "solution_index": solution_index,
                 "problem_id": self.problem.problem_id, "seed": self.seed, "arm": self.arm,
                 # Slurm may restart the same model on a different host or port.
                 "backend": self.client.configuration.model_dump(exclude={"base_url"}),

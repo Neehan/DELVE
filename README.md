@@ -101,7 +101,7 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
 uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --model qwen3-4b-instruct-2507
 ```
 
-Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (the k=8 defaults are shown above; smaller budgets scale by 8/k, capped at 128 for Qwen/Ministral and 256 for DeepSeek), `--inject-sketch-at` (default 0), and `--solution-index` (default 0). Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
+Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (the k=8 defaults are shown above; smaller budgets scale by 8/k, capped at 128 for Qwen/Ministral and 256 for DeepSeek), `--inject-sketch-at` (default 0), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 
