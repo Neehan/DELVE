@@ -2,7 +2,7 @@
 
 Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` harness collects math-solving trajectories through a vLLM OpenAI-compatible endpoint; RL training comes later.
 
-Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit larger budgets supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
+Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
 **Environment**
 
@@ -101,7 +101,7 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
 uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --model qwen3-4b-instruct-2507
 ```
 
-Both experiments default to 5× (40,960 output tokens). Set `--compute-multiplier-k` to any positive integer to override the budget. Optional flags: `--batch-size` (defaults above scale by 5/k, with a minimum of 1 and caps of 128 for Qwen/Ministral or 256 for DeepSeek), `--inject-sketch-at` (default 0; must be less than k), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
+Both experiments default to 5× (40,960 output tokens). Set `--compute-multiplier-k` to an integer from 1 to 8 to override the budget. Optional flags: `--batch-size` (defaults above scale by 5/k, with a minimum of 1 and caps of 128 for Qwen/Ministral or 256 for DeepSeek), `--inject-sketch-at` (default 0; must be less than k), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 

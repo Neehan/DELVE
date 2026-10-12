@@ -31,8 +31,6 @@ def parse_arguments(arguments: list[str]) -> RunConfig:
     parser.add_argument("--batch-size", type=int,
                         help=f"Maximum concurrent trajectories (model defaults: {DEFAULT_BATCH_SIZES})")
     args = vars(parser.parse_args(arguments))
-    if args["compute_multiplier_k"] < 1:
-        parser.error("compute-multiplier-k must be positive")
     if args["batch_size"] is None:
         long_batch, short_batch = DEFAULT_BATCH_SIZES[args["model"]]
         args["batch_size"] = max(1, min(short_batch, long_batch * DEFAULT_BLOCKS // args["compute_multiplier_k"]))

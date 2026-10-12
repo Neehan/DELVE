@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from discovery_execution.harness.constants import (
-    COMPETITIONS, SAFE_COMPONENT, SUPPORTED_MODELS,
+    COMPETITIONS, MAX_BLOCKS, SAFE_COMPONENT, SUPPORTED_MODELS,
 )
 
 
@@ -86,8 +86,8 @@ class RunConfig(DatasetConfig):
         """Reject invalid run combinations before reading or generating data."""
         if self.model not in SUPPORTED_MODELS:
             raise ValueError(f"unsupported model: {self.model}; choose from {', '.join(SUPPORTED_MODELS)}")
-        if self.compute_multiplier_k < 1:
-            raise ValueError("compute-multiplier-k must be positive")
+        if not 1 <= self.compute_multiplier_k <= MAX_BLOCKS:
+            raise ValueError(f"compute-multiplier-k must be 1..{MAX_BLOCKS}")
         if not 0 <= self.inject_sketch_at < self.compute_multiplier_k:
             raise ValueError("injection must be nonnegative and before the output budget")
         if self.solution_index is not None and self.solution_index < 0:

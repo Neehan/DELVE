@@ -21,8 +21,6 @@ def parse_arguments(arguments: list[str]) -> Namespace:
         parser.error("seeds must be nonnegative")
     if args.inject_sketch_at is not None and args.experiment != ORACLE_EXECUTION_EXPERIMENT:
         parser.error("--inject-sketch-at requires --experiment oracle-execution")
-    if args.compute_multiplier_k is not None and args.compute_multiplier_k < 1:
-        parser.error("compute-multiplier-k must be positive")
     if args.inject_sketch_at is not None:
         if args.inject_sketch_at < 0 or (args.compute_multiplier_k is not None
                                        and args.inject_sketch_at >= args.compute_multiplier_k):

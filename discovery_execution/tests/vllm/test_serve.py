@@ -68,16 +68,6 @@ def test_batch_scales_with_budget(model: str) -> None:
     assert sizes == sorted(sizes, reverse=True)
 
 
-@pytest.mark.parametrize("model", SUPPORTED_MODELS)
-def test_large_explicit_budget_keeps_a_worker(model: str) -> None:
-    """Budget scaling cannot round concurrency down to zero for an explicit large horizon."""
-    default_batch, _ = DEFAULT_BATCH_SIZES[model]
-    config = parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
-                              "--experiment", "unaided", "--compute-multiplier-k",
-                              str(default_batch * DEFAULT_BLOCKS + 1), "--seeds", "0"])
-    assert config.batch_size == 1
-
-
 @pytest.mark.parametrize("concurrency", [0, -1])
 def test_invalid_concurrency(concurrency: int) -> None:
     """An explicit invalid limit must fail instead of selecting the model default."""

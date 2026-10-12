@@ -48,7 +48,6 @@ def test_dataset_environment_preserves_saved_settings(run_arguments: list[str],
     *[(UNAIDED_EXPERIMENT, 0, block) for block in range(1, DEFAULT_BLOCKS + 1)],
     *[(ORACLE_EXECUTION_EXPERIMENT, block, DEFAULT_BLOCKS) for block in range(DEFAULT_BLOCKS)],
     (UNAIDED_EXPERIMENT, 0, 8), (ORACLE_EXECUTION_EXPERIMENT, 7, 8),
-    (UNAIDED_EXPERIMENT, 0, 10), (ORACLE_EXECUTION_EXPERIMENT, 9, 10),
 ])
 async def test_full_trajectory(experiment: str, injection: int, compute_multiplier_k: int, model_name: str, problem: Problem,
                                make_run_config: Callable[[str, int], RunConfig],
@@ -89,6 +88,14 @@ def test_unsupported_model_fails(make_run_config: Callable[[str, int], RunConfig
         RunConfig.model_validate({**config.model_dump(), "model": "unknown-model"})
 
 
+@pytest.mark.parametrize("budget", [9, 200])
+def test_config_rejects_excessive_budget(budget: int, make_run_config: Callable[[str, int], RunConfig]) -> None:
+    """Enforce the ceiling even when callers bypass argparse."""
+    config = make_run_config(ORACLE_EXECUTION_EXPERIMENT, 0)
+    with pytest.raises(ValueError, match="compute-multiplier-k"):
+        RunConfig.model_validate({**config.model_dump(), "compute_multiplier_k": budget})
+
+
 async def test_wrong_served_name_fails(client: OpenAIClient) -> None:
     """Fail during preflight when the endpoint does not serve the selected alias."""
     with pytest.raises(ValueError, match="--served-model-name qwen3-1.7b"):
@@ -102,6 +109,8 @@ async def test_wrong_served_name_fails(client: OpenAIClient) -> None:
     (ORACLE_EXECUTION_EXPERIMENT, DEFAULT_BLOCKS, DEFAULT_BLOCKS),
     (ORACLE_EXECUTION_EXPERIMENT, 2, 2),
     (ORACLE_EXECUTION_EXPERIMENT, 8, 8),
+    (UNAIDED_EXPERIMENT, 9, None), (ORACLE_EXECUTION_EXPERIMENT, 9, None),
+    (UNAIDED_EXPERIMENT, 200, None), (ORACLE_EXECUTION_EXPERIMENT, 200, None),
 ])
 def test_cli_budget_selection(run_arguments: list[str], experiment: str,
                               multiplier: int | None, expected: int | None) -> None:

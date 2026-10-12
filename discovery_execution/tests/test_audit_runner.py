@@ -147,9 +147,21 @@ def test_audit_filters_saved_budget(saved_runs: list[Path], tmp_path: Path) -> N
     ["--year", "0"], ["--seeds", "-1"], ["--inject-sketch-at", "0"],
     ["--experiment", "oracle-execution", "--compute-multiplier-k", "2", "--inject-sketch-at", "2"],
     ["--compute-multiplier-k", "0"],
+    ["--compute-multiplier-k", "9"], ["--compute-multiplier-k", "200"],
     ["--experiment", "oracle-execution", "--inject-sketch-at", "-1"],
 ])
 def test_audit_rejects_invalid_selection(run_arguments: list[str], options: list[str]) -> None:
     """Fail before accessing disk for invalid partitions and oracle selections."""
     with pytest.raises(SystemExit):
         parse_arguments([*run_arguments, *options])
+
+
+@pytest.mark.parametrize("budget", [9, 200])
+def test_audit_record_rejects_excessive_budget(budget: int, model_name: str) -> None:
+    """Saved audit rows must obey the same ceiling as collection."""
+    with pytest.raises(ValueError, match="compute multiplier"):
+        AuditRecord.model_validate({
+            "dataset": "aime/2024", "solver_model": model_name, "experiment": "oracle-execution",
+            "compute_multiplier_k": budget, "inject_sketch_at": 0, "solution_index": 0,
+            "problem_id": "example", "seed": 0, "checkpoint_multiplier_k": 1, "correctness": {"score": 0},
+        })
