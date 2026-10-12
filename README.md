@@ -87,6 +87,8 @@ Serving uses an 81,920-token context and 92% GPU memory utilization. For long tr
 
 Throughput measurements are from the previous synthetic growing-context benchmark up to 70,000 tokens, not a benchmark of the new five-block runs.
 
+Qwen3 4B uses 8,192 batched prefill tokens. A follow-up screen on 2× L40S compared 2,048 versus 8,192 prefill tokens at batches 24, 32, and 40, using 8,192-, 24,576-, and 40,960-token inputs and mixed input lengths. It generated 512 tokens per request with prefix caching disabled. Larger prefill chunks gave a modest gain at long contexts; larger batches gave almost no gain near 40,960 tokens, so the five-block default remains 24. These measurements include prefill and do not estimate full trajectory completion time.
+
 Use that same name for `--model`; requests, saved settings, and output folders retain it:
 
 ```bash

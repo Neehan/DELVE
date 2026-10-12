@@ -21,6 +21,10 @@ def test_serving_command(model: str) -> None:
     assert command[command.index("--kv-cache-dtype") + 1] == KV_CACHE_DTYPE[model]
     assert command[command.index(f"--{PARALLELISM[model]}-parallel-size") + 1] == "2"
     assert not {"--reasoning-parser", "--enable-auto-tool-choice", "--quantization"} & set(command)
+    if model == "qwen3-4b-instruct-2507":
+        assert command[command.index("--max-num-batched-tokens") + 1] == "8192"
+    else:
+        assert "--max-num-batched-tokens" not in command
     if model == "qwen3-1.7b":
         rope = json.loads(command[command.index("--hf-overrides") + 1])["rope_parameters"]
         assert rope["factor"] * rope["original_max_position_embeddings"] == 131072
