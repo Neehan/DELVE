@@ -3,7 +3,8 @@
 import hashlib
 
 from discovery_execution.harness.constants import (
-    META_FILENAME, NEXT_PHASE, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, PROMPTS_DIRECTORY, UNAIDED_EXPERIMENT, UNAIDED_SOLUTION_INDEX, SEED_MODULUS, SOLVE_PHASE,
+    CONTINUATION_EXPERIMENTS, META_FILENAME, NEXT_PHASE, ORACLE_EXPERIMENTS,
+    OUTPUT_TOKENS_PER_BLOCK, PROMPTS_DIRECTORY, UNAIDED_EXPERIMENT, UNAIDED_SOLUTION_INDEX, SEED_MODULUS, SOLVE_PHASE,
 )
 from discovery_execution.harness.models import Checkpoint, GenerationRequest, GenerationResponse, Problem, RunConfig, RunState
 from discovery_execution.harness.openai_client import OpenAIClient
@@ -19,13 +20,21 @@ class SelfRefine:
         self.problem = problem
         self.seed = seed
         self.client = client
-        oracle = config.experiment == ORACLE_EXECUTION_EXPERIMENT
+        oracle = config.experiment in ORACLE_EXPERIMENTS
         self.sketch: str | None = None
-        self.injection_tokens = config.inject_sketch_at * OUTPUT_TOKENS_PER_BLOCK if oracle else None
+        injection = config.continue_at if config.continue_at is not None else config.inject_sketch_at
+        self.injection_tokens = injection * OUTPUT_TOKENS_PER_BLOCK if oracle else None
         self.token_budget = config.compute_multiplier_k * OUTPUT_TOKENS_PER_BLOCK
-        self.arm = f"oracle-at-{config.inject_sketch_at}x-execution" if oracle else f"{UNAIDED_EXPERIMENT}-{config.compute_multiplier_k}x"
+        if config.experiment in CONTINUATION_EXPERIMENTS:
+            self.arm = f"{config.experiment}-at-{config.continue_at}x"
+        elif oracle:
+            self.arm = f"oracle-at-{config.inject_sketch_at}x-execution"
+        else:
+            self.arm = f"{UNAIDED_EXPERIMENT}-{config.compute_multiplier_k}x"
         directory = (model_output_directory(config.output_directory, config.competition, config.year, config.model)
-                     / self.arm / problem.problem_id / f"seed_{seed}")
+                     / self.arm / problem.problem_id)
+        directory = (directory / f"seed_{config.source_seed}" / f"branch_{seed}"
+                     if config.experiment in CONTINUATION_EXPERIMENTS else directory / f"seed_{seed}")
         self.prompts = {
             name: (PROMPTS_DIRECTORY / f"{name}.md").read_text(encoding="utf-8").strip()
             for name in ("solve", "critique", "revise", "sketch")
@@ -36,24 +45,32 @@ class SelfRefine:
     async def run(self) -> None:
         """Load progress, then prepare, generate, update, and save until the budget is exhausted."""
         with self.storage:
-            oracle = self.config.experiment == ORACLE_EXECUTION_EXPERIMENT
+            oracle = self.config.experiment in ORACLE_EXPERIMENTS
             solution_index = self.config.solution_index
             if solution_index is None:
-                solution_index = self.seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
+                sketch_seed = self.config.source_seed if self.config.source_seed is not None else self.seed
+                solution_index = sketch_seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
                 if (self.storage.directory / META_FILENAME).exists():
                     solution_index = self.storage.read_metadata()["solution_index"]
             if oracle:
                 if not 0 <= solution_index < len(self.problem.solutions):
                     raise ValueError(f"missing solution index for {self.problem.problem_id}")
                 self.sketch = self.problem.solutions[solution_index].sketch
+            excluded = {"seeds", "batch_size", "output_directory"}
+            if self.config.continue_at is None:
+                excluded.update({"source_arm", "source_seed", "continue_at"})
             metadata = {
-                **self.config.model_dump(mode="json", exclude={"seeds", "batch_size", "output_directory"}),
+                **self.config.model_dump(mode="json", exclude=excluded),
+                "inject_sketch_at": self.injection_tokens // OUTPUT_TOKENS_PER_BLOCK if self.injection_tokens is not None else 0,
                 "solution_index": solution_index,
                 "problem_id": self.problem.problem_id, "seed": self.seed, "arm": self.arm,
                 # Slurm may restart the same model on a different host or port.
                 "backend": self.client.configuration.model_dump(exclude={"base_url"}),
             }
             self.state = self.storage.load(metadata)
+            if self.config.continue_at is not None and not self.state.output_tokens:
+                self.state = self.storage.load_source_prefix(metadata)
+                self.storage.save(self.state)
             while self.state.output_tokens < self.token_budget:
                 self._add_next_instruction()
                 request = self._build_request()
@@ -92,6 +109,8 @@ class SelfRefine:
     def _build_request(self) -> GenerationRequest:
         """Derive a reproducible sampling seed and cap output at the next block boundary."""
         identity = f"{self.arm}:{self.seed}:{len(self.state.requests)}".encode("utf-8")
+        if self.config.continue_at is not None:
+            identity += f":{self.config.source_arm}:{self.config.source_seed}".encode("utf-8")
         seed = int.from_bytes(hashlib.sha256(identity).digest()) % SEED_MODULUS
         boundary = (self.state.output_tokens // OUTPUT_TOKENS_PER_BLOCK + 1) * OUTPUT_TOKENS_PER_BLOCK
         allowance = min(boundary, self.token_budget) - self.state.output_tokens

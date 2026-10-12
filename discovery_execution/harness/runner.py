@@ -5,7 +5,7 @@ import logging
 from collections.abc import Iterator
 
 from discovery_execution.dataset import Dataset
-from discovery_execution.harness.constants import ORACLE_EXECUTION_EXPERIMENT
+from discovery_execution.harness.constants import ORACLE_EXPERIMENTS
 from discovery_execution.harness.models import Problem, RunConfig
 from discovery_execution.harness.openai_client import OpenAIClient
 from discovery_execution.harness.self_refine import SelfRefine
@@ -22,7 +22,7 @@ class Runner:
 
     async def run(self) -> bool:
         """Validate sketch availability and the model, then process every problem/seed."""
-        if self.config.experiment == ORACLE_EXECUTION_EXPERIMENT and self.config.solution_index is not None:
+        if self.config.experiment in ORACLE_EXPERIMENTS and self.config.solution_index is not None:
             for problem in self.dataset:
                 if self.config.solution_index >= len(problem.solutions):
                     raise ValueError(f"missing solution index for {problem.problem_id}")

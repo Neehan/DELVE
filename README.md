@@ -4,6 +4,10 @@ Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` ha
 
 Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
+The planned critic takes the partial conversation, current phase, and remaining budget, and predicts the probability that the last boxed answer will be correct when that budget ends.
+
+Training labels come from continuing the same self-refinement harness and grading the last boxed answer: 1 if correct, 0 otherwise; earlier correct answers do not override the final grade.
+
 **Environment**
 
 Run commands from the repository root. Copy `.env.example` to `.env` and configure:
@@ -106,6 +110,15 @@ uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --
 Both experiments default to 5× (40,960 output tokens). Set `--compute-multiplier-k` to an integer from 1 to 8 to override the budget. Optional flags: `--batch-size` (defaults above scale by 5/k, with a minimum of 1 and caps of 128 for Qwen/Ministral or 256 for DeepSeek), `--inject-sketch-at` (default 0; must be less than k), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
+
+Branch from an existing unaided checkpoint with the same model and sampling settings:
+
+```bash
+uv run python -m discovery_execution.cli.run --competition aime --year 2024 --model qwen3-1.7b \
+  --experiment continue --source-arm unaided-5x --source-seed 0 --continue-at 1 --seeds 0 1 2 3
+```
+
+Use `--experiment continue-oracle` to inject a sketch at that same prefix; its default solution is selected by the source seed, shared across branches. The 5× default budget includes the prefix. Outputs use `<arm>/<problem>/seed_<source-seed>/branch_<seed>/`, with arms `continue-at-1x` or `continue-oracle-at-1x`. Only post-fork checkpoints are saved, on the original timeline. Audit accepts the same source selectors; continuation arms are excluded from DE fitting. Reusing a branch directory with different source settings or budget fails.
 
 After generation and auditing finish, run `bash discovery_execution/scripts/upload_outputs.sh` from a network-enabled shell. It uploads these artifacts to `HF_OUTPUTS_REPO`, preserving paths below `output/` and excluding locks and temporary files. A missing repository is created private; existing visibility is unchanged. Rerunning updates matching paths without deleting remote-only files.
 

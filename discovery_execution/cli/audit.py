@@ -5,7 +5,7 @@ from argparse import ArgumentParser, Namespace
 
 from discovery_execution.audit.runner import AuditRunner
 from discovery_execution.cli.arguments import add_selection_arguments
-from discovery_execution.harness.constants import ORACLE_EXECUTION_EXPERIMENT, OUTPUT_DIRECTORY
+from discovery_execution.harness.constants import CONTINUATION_EXPERIMENTS, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_DIRECTORY
 from discovery_execution.harness.storage import model_output_directory
 
 
@@ -25,6 +25,14 @@ def parse_arguments(arguments: list[str]) -> Namespace:
         if args.inject_sketch_at < 0 or (args.compute_multiplier_k is not None
                                        and args.inject_sketch_at >= args.compute_multiplier_k):
             parser.error("injection must be nonnegative and before the output budget")
+    if any(value is not None for value in (args.source_arm, args.source_seed, args.continue_at)):
+        if args.experiment is not None and args.experiment not in CONTINUATION_EXPERIMENTS:
+            parser.error("source options require a continuation experiment")
+        if args.source_seed is not None and args.source_seed < 0:
+            parser.error("source-seed must be nonnegative")
+        if args.continue_at is not None and args.compute_multiplier_k is not None:
+            if args.continue_at >= args.compute_multiplier_k:
+                parser.error("continue-at must precede the output budget")
     return args
 
 
@@ -33,7 +41,8 @@ def main() -> None:
     args = parse_arguments(sys.argv[1:])
     directory = model_output_directory(OUTPUT_DIRECTORY, args.competition, args.year, args.model)
     filters = {name: value for name, value in vars(args).items()
-               if name in {"experiment", "compute_multiplier_k", "inject_sketch_at"} and value is not None}
+               if name in {"experiment", "compute_multiplier_k", "inject_sketch_at", "source_arm",
+                           "source_seed", "continue_at"} and value is not None}
     AuditRunner().run(directory, args.problems, args.seeds, filters)
 
 

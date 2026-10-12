@@ -3,6 +3,7 @@
 import fcntl
 import json
 from pathlib import Path
+from typing import Any
 
 from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
 from discovery_execution.audit.models import AuditRecord
@@ -23,30 +24,42 @@ class AuditCompiler:
         with (self.directory / LOCK_FILENAME).open("a") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             rows = self._collect_records()
-            content = "".join(row.model_dump_json() + "\n" for row in rows)
+            content = "".join(row.model_dump_json(exclude_none=True) + "\n" for row in rows)
             atomic_write(destination, content.encode("utf-8"))
         return destination
 
     def _collect_records(self) -> list[AuditRecord]:
         """Read current per-seed audits and attach the same identity fields used by DE."""
         rows = []
-        for path in sorted(self.directory.glob(f"*/seed_*/{AUDIT_FILENAME}")):
+        for path in sorted(self.directory.rglob(AUDIT_FILENAME)):
             settings = json.loads((path.parent / META_FILENAME).read_text(encoding="utf-8"))
             result = json.loads(path.read_text(encoding="utf-8"))
-            expected = {f"{k}x" for k in range(1, result["output_tokens"] // OUTPUT_TOKENS_PER_BLOCK + 1)}
-            if set(result["checkpoints"]) != expected or result["output_tokens"] % OUTPUT_TOKENS_PER_BLOCK:
-                raise ValueError(f"missing or invalid audit checkpoints: {path}")
-            if result["complete"] != (result["output_tokens"] == settings["compute_multiplier_k"] * OUTPUT_TOKENS_PER_BLOCK):
-                raise ValueError(f"audit completion does not match its budget: {path}")
-            if (path.parent.name != f"seed_{settings['seed']}" or path.parent.parent.name != settings["problem_id"]
-                    or self.directory.name != settings["arm"]):
-                raise ValueError(f"audit identity does not match directory: {path}")
+            self._validate_audit(path, settings, result)
             identity = {
                 "dataset": f"{settings['competition']}/{settings['year']}", "solver_model": settings["model"],
                 **{key: settings[key] for key in ("experiment", "compute_multiplier_k", "inject_sketch_at",
                                                  "solution_index", "problem_id", "seed")},
             }
+            if "continue_at" in settings:
+                identity.update({key: settings[key] for key in ("source_arm", "source_seed", "continue_at")})
             for label, checkpoint in result["checkpoints"].items():
                 rows.append(AuditRecord(**identity, checkpoint_multiplier_k=int(label.removesuffix("x")),
                                         correctness=checkpoint["correctness"]))
-        return sorted(rows, key=lambda row: (row.problem_id, row.seed, row.checkpoint_multiplier_k))
+        return sorted(rows, key=lambda row: (row.problem_id, row.source_seed if row.source_seed is not None else -1,
+                                             row.seed, row.checkpoint_multiplier_k))
+
+    def _validate_audit(self, path: Path, settings: dict[str, Any], result: dict[str, Any]) -> None:
+        """Validate absolute checkpoint ranges and both parent and branch identities before export."""
+        start = settings.get("continue_at", 0) + 1
+        expected = {f"{k}x" for k in range(start, result["output_tokens"] // OUTPUT_TOKENS_PER_BLOCK + 1)}
+        if not expected or set(result["checkpoints"]) != expected or result["output_tokens"] % OUTPUT_TOKENS_PER_BLOCK:
+            raise ValueError(f"missing or invalid audit checkpoints: {path}")
+        if result["complete"] != (result["output_tokens"] == settings["compute_multiplier_k"] * OUTPUT_TOKENS_PER_BLOCK):
+            raise ValueError(f"audit completion does not match its budget: {path}")
+        trajectory = self.directory / settings["problem_id"]
+        if "continue_at" in settings:
+            trajectory = trajectory / f"seed_{settings['source_seed']}" / f"branch_{settings['seed']}"
+        else:
+            trajectory = trajectory / f"seed_{settings['seed']}"
+        if path.parent != trajectory or self.directory.name != settings["arm"]:
+            raise ValueError(f"audit identity does not match directory: {path}")

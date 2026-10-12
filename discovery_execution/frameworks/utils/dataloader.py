@@ -50,6 +50,8 @@ class DataLoader:
         with path.open(encoding="utf-8") as handle:
             for line in handle:
                 row = AuditRecord.model_validate_json(line)
+                if row.experiment not in ("unaided", "oracle-execution"):
+                    raise ValueError(f"continuation audits cannot be used for root DE fitting: {path}")
                 arm = f"unaided-{row.compute_multiplier_k}x" if row.experiment == "unaided" else f"oracle-at-{row.inject_sketch_at}x-execution"
                 expected_directory = self.results / row.dataset / row.solver_model / arm
                 if expected_directory != directory or row.compute_multiplier_k != horizon:

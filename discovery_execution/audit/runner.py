@@ -23,10 +23,11 @@ class AuditRunner:
         partitions: dict[tuple[str, str, int], dict[str, str]] = {}
         references: dict[Path, str] = {}
         for path in paths:
-            for filename in (META_FILENAME, CHECKPOINT_FILENAME.format(k=1)):
+            settings = json.loads((path / META_FILENAME).read_text(encoding="utf-8"))
+            start = settings.get("continue_at", 0) + 1
+            for filename in (META_FILENAME, CHECKPOINT_FILENAME.format(k=start)):
                 if not (path / filename).is_file():
                     raise FileNotFoundError(path / filename)
-            settings = json.loads((path / META_FILENAME).read_text(encoding="utf-8"))
             key = (settings["datasets_directory"], settings["competition"], settings["year"])
             if key not in partitions:
                 config = DatasetConfig(datasets_directory=Path(key[0]), competition=key[1], year=key[2],
@@ -38,7 +39,8 @@ class AuditRunner:
             references[path] = partitions[key][problem_id]
         for path in paths:
             self._grade(path, references[path])
-        for arm_directory in sorted({path.parent.parent for path in paths}):
+        for arm_directory in sorted({path.parent.parent.parent if path.name.startswith("branch_")
+                                     else path.parent.parent for path in paths}):
             AuditCompiler(arm_directory).compile()
 
     def _select(self, directory: Path, problems: list[str] | None, seeds: list[int] | None,
@@ -51,7 +53,7 @@ class AuditRunner:
         found_seeds: set[int] = set()
         for path in sorted(directory.rglob(META_FILENAME)):
             metadata = json.loads(path.read_text(encoding="utf-8"))
-            if any(metadata[name] != value for name, value in filters.items()):
+            if any(metadata.get(name) != value for name, value in filters.items()):
                 continue
             problem, seed = metadata["problem_id"], metadata["seed"]
             if problems is not None and problem not in problems:
@@ -74,5 +76,6 @@ class AuditRunner:
         with Storage(directory) as storage:
             grader = AnswerGrader(final_answer)
             settings = storage.read_metadata()
-            result = grader.grade_checkpoints(storage.read_checkpoints(), settings["compute_multiplier_k"])
+            start = settings.get("continue_at", 0) + 1
+            result = grader.grade_checkpoints(storage.read_checkpoints(start), settings["compute_multiplier_k"])
             write_json(directory / AUDIT_FILENAME, result)

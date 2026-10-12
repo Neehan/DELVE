@@ -63,6 +63,9 @@ audit_arguments = ["--competition", config.competition, "--year", str(config.yea
                    "--experiment", config.experiment, "--compute-multiplier-k", str(config.compute_multiplier_k)]
 if config.experiment == ORACLE_EXECUTION_EXPERIMENT:
     audit_arguments.extend(["--inject-sketch-at", str(config.inject_sketch_at)])
+if config.continue_at is not None:
+    audit_arguments.extend(["--source-arm", config.source_arm, "--source-seed", str(config.source_seed),
+                            "--continue-at", str(config.continue_at)])
 print(config.model)
 print(*audit_arguments, "--seeds", *config.seeds)
 print(config.batch_size)
