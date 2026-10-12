@@ -8,7 +8,7 @@ import pytest
 import zstandard
 
 from discovery_execution.harness.constants import (
-    CHECKPOINT_FILENAME, CONVERSATION_FILENAME, OUTPUT_TOKENS_PER_BLOCK, TOTAL_BLOCKS,
+    CHECKPOINT_FILENAME, CONVERSATION_FILENAME, OUTPUT_TOKENS_PER_BLOCK, DEFAULT_BLOCKS,
 )
 from discovery_execution.harness.models import RunState
 from discovery_execution.harness.storage import Storage, atomic_write
@@ -17,7 +17,7 @@ from discovery_execution.harness.storage import Storage, atomic_write
 @pytest.fixture
 def metadata() -> dict[str, Any]:
     """Use immutable identity settings to exercise matching and mismatched resumes."""
-    return {"model": "model", "seed": 0, "compute_multiplier_k": TOTAL_BLOCKS}
+    return {"model": "model", "seed": 0, "compute_multiplier_k": DEFAULT_BLOCKS}
 
 
 def test_resume_saved_state(tmp_path: Path, metadata: dict[str, Any], conversation: RunState) -> None:
@@ -33,7 +33,7 @@ def test_resume_saved_state(tmp_path: Path, metadata: dict[str, Any], conversati
     assert saved["messages"] == conversation.messages
 
 
-@pytest.mark.parametrize("compute_multiplier_k", range(1, TOTAL_BLOCKS + 1))
+@pytest.mark.parametrize("compute_multiplier_k", range(1, DEFAULT_BLOCKS + 1))
 def test_skip_completed_after_validating_settings(tmp_path: Path, metadata: dict[str, Any], conversation: RunState,
                                                   compute_multiplier_k: int, caplog: pytest.LogCaptureFixture) -> None:
     """Skip a matching completed run but reject changed settings before treating it as reusable."""

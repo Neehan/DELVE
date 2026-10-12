@@ -2,7 +2,7 @@
 
 Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` harness collects math-solving trajectories through a vLLM OpenAI-compatible endpoint; RL training comes later.
 
-Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Unaided runs choose k=1–8; oracle runs always use k=8 and inject a sketch at 0×–7×. Finishing an answer does not stop generation.
+Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit larger budgets supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
 **Environment**
 
@@ -74,18 +74,18 @@ With vLLM 0.26.0 installed, start a server on two GPUs:
 uv run python -m discovery_execution.vllm.serve --model qwen3-4b-instruct-2507
 ```
 
-The server must report at least 100,000 context tokens; long inputs or many refinement turns may require more.
+The server must report at least 81,920 context tokens, including inputs and generated output; unusually long inputs or many refinement turns may require more.
 
-Serving uses a 131,072-token context and 92% GPU memory utilization. For long trajectories on 2× L40S, use:
+Serving uses an 81,920-token context and 92% GPU memory utilization. For long trajectories on 2× L40S, use:
 
-| Model | Parallelism | KV cache | Batch for 65,536 output tokens | Long-context output tokens/sec |
+| Model | Parallelism | KV cache | Default batch (5×) | Measured long-context tokens/sec |
 | --- | --- | --- | ---: | ---: |
 | Qwen3 4B | Tensor, 2 GPUs | FP8 E4M3 | 24 | 450 |
 | Qwen3 1.7B | Tensor, 2 GPUs | FP8 E4M3 | 32 | 615 |
 | Ministral 3B | Tensor, 2 GPUs | BF16 (`auto`) | 16 | 342 |
 | DeepSeek 1.5B | Data, 2 replicas | BF16 (`auto`) | 32 | 978 |
 
-Throughput is aggregate across both GPUs in synthetic growing-context workloads up to 70,000 tokens.
+Throughput measurements are from the previous synthetic growing-context benchmark up to 70,000 tokens, not a benchmark of the new five-block runs.
 
 Use that same name for `--model`; requests, saved settings, and output folders retain it:
 
@@ -101,7 +101,7 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
 uv run python -m discovery_execution.cli.audit --competition aime --year 2024 --model qwen3-4b-instruct-2507
 ```
 
-Unaided requires `--compute-multiplier-k 1..8`; oracle fixes k=8. Optional flags: `--batch-size` (the k=8 defaults are shown above; smaller budgets scale by 8/k, capped at 128 for Qwen/Ministral and 256 for DeepSeek), `--inject-sketch-at` (default 0), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
+Both experiments default to 5× (40,960 output tokens). Set `--compute-multiplier-k` to any positive integer to override the budget. Optional flags: `--batch-size` (defaults above scale by 5/k, with a minimum of 1 and caps of 128 for Qwen/Ministral or 256 for DeepSeek), `--inject-sketch-at` (default 0; must be less than k), and `--solution-index` (override the default round-robin selection, `seed % len(solutions)`). A seed selects the same sketch at every injection time; `meta.json` records the actual index, which is preserved on resume. Rerunning resumes saved responses and skips completed trajectories. Transient failures retry three times with 1/2/4-second waits; partial failed responses are discarded.
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 
@@ -124,6 +124,6 @@ uv run python -m discovery_execution.cli.frameworks --competition aime --year 20
   --model qwen3-4b-instruct-2507
 ```
 
-Use `--frameworks sg de` to select methods; all four run by default. Fitting requires at least 24 complete short seeds and 3 complete oracle seeds per problem. R-DE additionally needs both first-block successes and later/unsolved oracle outcomes. Long unaided and delayed-sketch arms are excluded from fitting.
+Use `--frameworks sg de` to select methods; all four run by default. Fitting requires at least 24 complete short seeds and 3 complete five-block oracle seeds per problem. R-DE additionally needs both first-block successes and later/unsolved oracle outcomes. Long unaided and delayed-sketch arms are excluded from fitting.
 
-Outputs are `frameworks/<method>/fit.json` and `predictions.jsonl` under the model directory. Multiple competitions and years select their cross product and share regularized priors. Evaluate forecasts against separately collected unaided 2×–8× arms.
+Outputs are `frameworks/<method>/fit.json` and `predictions.jsonl` under the model directory. Multiple competitions and years select their cross product and share regularized priors. Evaluate forecasts against separately collected unaided 2×–5× arms.

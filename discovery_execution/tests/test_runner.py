@@ -9,7 +9,7 @@ import pytest
 import zstandard
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, GENERATION_RETRY_DELAYS, META_FILENAME, MIN_CONTEXT_TOKENS, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, SUPPORTED_MODELS, TOTAL_BLOCKS, TOTAL_OUTPUT_TOKENS, UNAIDED_EXPERIMENT,
+    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, GENERATION_RETRY_DELAYS, META_FILENAME, MIN_CONTEXT_TOKENS, ORACLE_EXECUTION_EXPERIMENT, OUTPUT_TOKENS_PER_BLOCK, SUPPORTED_MODELS, DEFAULT_BLOCKS, UNAIDED_EXPERIMENT,
 )
 from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
 from discovery_execution.audit.models import AuditRecord
@@ -45,8 +45,10 @@ def test_dataset_environment_preserves_saved_settings(run_arguments: list[str],
 
 @pytest.mark.parametrize("model_name", SUPPORTED_MODELS)
 @pytest.mark.parametrize("experiment,injection,compute_multiplier_k", [
-    *[(UNAIDED_EXPERIMENT, 0, block) for block in range(1, TOTAL_BLOCKS + 1)],
-    *[(ORACLE_EXECUTION_EXPERIMENT, block, TOTAL_BLOCKS) for block in range(TOTAL_BLOCKS)],
+    *[(UNAIDED_EXPERIMENT, 0, block) for block in range(1, DEFAULT_BLOCKS + 1)],
+    *[(ORACLE_EXECUTION_EXPERIMENT, block, DEFAULT_BLOCKS) for block in range(DEFAULT_BLOCKS)],
+    (UNAIDED_EXPERIMENT, 0, 8), (ORACLE_EXECUTION_EXPERIMENT, 7, 8),
+    (UNAIDED_EXPERIMENT, 0, 10), (ORACLE_EXECUTION_EXPERIMENT, 9, 10),
 ])
 async def test_full_trajectory(experiment: str, injection: int, compute_multiplier_k: int, model_name: str, problem: Problem,
                                make_run_config: Callable[[str, int], RunConfig],
@@ -94,15 +96,16 @@ async def test_wrong_served_name_fails(client: OpenAIClient) -> None:
 
 
 @pytest.mark.parametrize("experiment,multiplier,expected", [
-    (UNAIDED_EXPERIMENT, None, None), (UNAIDED_EXPERIMENT, 0, None),
-    (UNAIDED_EXPERIMENT, TOTAL_BLOCKS + 1, None), (UNAIDED_EXPERIMENT, 2, 2),
-    (ORACLE_EXECUTION_EXPERIMENT, None, TOTAL_BLOCKS),
-    (ORACLE_EXECUTION_EXPERIMENT, TOTAL_BLOCKS, TOTAL_BLOCKS),
-    (ORACLE_EXECUTION_EXPERIMENT, 2, None),
+    (UNAIDED_EXPERIMENT, None, DEFAULT_BLOCKS), (UNAIDED_EXPERIMENT, 0, None),
+    (UNAIDED_EXPERIMENT, 8, 8), (UNAIDED_EXPERIMENT, 2, 2),
+    (ORACLE_EXECUTION_EXPERIMENT, None, DEFAULT_BLOCKS),
+    (ORACLE_EXECUTION_EXPERIMENT, DEFAULT_BLOCKS, DEFAULT_BLOCKS),
+    (ORACLE_EXECUTION_EXPERIMENT, 2, 2),
+    (ORACLE_EXECUTION_EXPERIMENT, 8, 8),
 ])
 def test_cli_budget_selection(run_arguments: list[str], experiment: str,
                               multiplier: int | None, expected: int | None) -> None:
-    """Require an explicit unaided horizon and reject attempts to shorten oracle runs."""
+    """Default both experiments to five blocks while accepting explicit shorter and longer budgets."""
     arguments = [*run_arguments, "--experiment", experiment]
     if multiplier is not None:
         arguments.extend(["--compute-multiplier-k", str(multiplier)])
@@ -111,6 +114,14 @@ def test_cli_budget_selection(run_arguments: list[str], experiment: str,
             parse_arguments(arguments)
     else:
         assert parse_arguments(arguments).compute_multiplier_k == expected
+
+
+@pytest.mark.parametrize("budget,injection", [(5, -1), (5, 5), (5, 7), (8, 8)])
+def test_injection_must_precede_budget(run_arguments: list[str], budget: int, injection: int) -> None:
+    """Reject sketches that would arrive after generation has already stopped."""
+    with pytest.raises(SystemExit):
+        parse_arguments([*run_arguments, "--experiment", ORACLE_EXECUTION_EXPERIMENT,
+                         "--compute-multiplier-k", str(budget), "--inject-sketch-at", str(injection)])
 
 
 @pytest.mark.parametrize("context_tokens", [MIN_CONTEXT_TOKENS - 1])
@@ -168,7 +179,7 @@ async def test_missing_sketch_fails_before_requests(make_run_config: Callable[[s
     assert not config.output_directory.exists()
 
 
-@pytest.mark.parametrize("injection", [0, 3, 7])
+@pytest.mark.parametrize("injection", [0, 3, DEFAULT_BLOCKS - 1])
 async def test_round_robin_sketch_selection(injection: int, multiple_solution_problem: Problem,
                                           make_run_config: Callable[[str, int], RunConfig],
                                           client: OpenAIClient) -> None:
@@ -181,7 +192,7 @@ async def test_round_robin_sketch_selection(injection: int, multiple_solution_pr
         settings = json.loads(path.read_text())
         expected = settings["seed"] % len(multiple_solution_problem.solutions)
         assert settings["solution_index"] == expected
-        for block in range(1, TOTAL_BLOCKS + 1):
+        for block in range(1, DEFAULT_BLOCKS + 1):
             snapshot = json.loads(zstandard.decompress((path.parent / CHECKPOINT_FILENAME.format(k=block)).read_bytes()))
             text = "\n".join(message["content"] for message in snapshot["messages"])
             for index, solution in enumerate(multiple_solution_problem.solutions):
@@ -190,7 +201,7 @@ async def test_round_robin_sketch_selection(injection: int, multiple_solution_pr
     AuditRunner().run(config.output_directory, None, None, {})
     compiled, = config.output_directory.rglob(COMPILED_AUDIT_FILENAME)
     audits = [AuditRecord.model_validate_json(line) for line in compiled.read_text().splitlines()]
-    assert len(audits) == len(config.seeds) * TOTAL_BLOCKS
+    assert len(audits) == len(config.seeds) * DEFAULT_BLOCKS
     assert all(row.solution_index == row.seed % len(multiple_solution_problem.solutions) for row in audits)
 
 
@@ -253,7 +264,7 @@ def test_cli_explicit_solution_index(index: int, run_arguments: list[str]) -> No
 
 
 @pytest.mark.parametrize("experiment,injection,compute_multiplier_k", [
-    (UNAIDED_EXPERIMENT, 0, 2), (ORACLE_EXECUTION_EXPERIMENT, 1, TOTAL_BLOCKS),
+    (UNAIDED_EXPERIMENT, 0, 2), (ORACLE_EXECUTION_EXPERIMENT, 1, DEFAULT_BLOCKS),
 ])
 async def test_resume_after_saved_boundary(experiment: str, injection: int, compute_multiplier_k: int,
                                            make_run_config: Callable[[str, int], RunConfig],
@@ -313,7 +324,7 @@ async def test_resume_after_interrupted_response(completed_requests: int,
     assert retried["seed"] == interrupted[0].seed
     assert retried["max_tokens"] == interrupted[0].max_tokens
     assert retried["continue_final_message"] == interrupted[0].continue_response
-    assert_intervention(records, ORACLE_EXECUTION_EXPERIMENT, 1, TOTAL_BLOCKS)
+    assert_intervention(records, ORACLE_EXECUTION_EXPERIMENT, 1, DEFAULT_BLOCKS)
     assert not list(config.output_directory.rglob("requests"))
     for path in config.output_directory.rglob("*.json*"):
         content = path.read_bytes()
@@ -373,7 +384,7 @@ async def test_resume_after_checkpoint_save_failure(make_run_config: Callable[[s
     discarded = records.pop()
     assert await Runner(config, client).run()
     assert records[1]["payload"] == discarded["payload"]
-    assert_intervention(records, ORACLE_EXECUTION_EXPERIMENT, 1, TOTAL_BLOCKS)
+    assert_intervention(records, ORACLE_EXECUTION_EXPERIMENT, 1, DEFAULT_BLOCKS)
 
 
 async def test_each_trajectory_owns_its_state_and_storage(problem: Problem, local_partition: Path,
@@ -404,8 +415,8 @@ async def test_each_trajectory_owns_its_state_and_storage(problem: Problem, loca
     assert len({id(item.prompts) for item in instances}) == count
     assert len({item.storage.directory for item in instances}) == count
     for item in instances:
-        assert item.state.output_tokens == TOTAL_OUTPUT_TOKENS
-        assert len(item.state.checkpoints) == TOTAL_BLOCKS
+        assert item.state.output_tokens == DEFAULT_BLOCKS * OUTPUT_TOKENS_PER_BLOCK
+        assert len(item.state.checkpoints) == DEFAULT_BLOCKS
         assert item.problem.statement in item.state.messages[0]["content"]
         settings = item.storage.read_metadata()
         assert settings["problem_id"] == item.problem.problem_id

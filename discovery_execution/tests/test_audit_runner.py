@@ -145,7 +145,9 @@ def test_audit_filters_saved_budget(saved_runs: list[Path], tmp_path: Path) -> N
 
 @pytest.mark.parametrize("options", [
     ["--year", "0"], ["--seeds", "-1"], ["--inject-sketch-at", "0"],
-    ["--experiment", "oracle-execution", "--compute-multiplier-k", "2"],
+    ["--experiment", "oracle-execution", "--compute-multiplier-k", "2", "--inject-sketch-at", "2"],
+    ["--compute-multiplier-k", "0"],
+    ["--experiment", "oracle-execution", "--inject-sketch-at", "-1"],
 ])
 def test_audit_rejects_invalid_selection(run_arguments: list[str], options: list[str]) -> None:
     """Fail before accessing disk for invalid partitions and oracle selections."""

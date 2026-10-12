@@ -16,7 +16,7 @@ from discovery_execution.harness.runner import Runner
 from discovery_execution.harness.constants import (
     DATASETS_DIRECTORY, DEFAULT_BATCH_SIZES, DEFAULT_SOLUTION_INDEX,
     ENV_FILE, FAILURE_EXIT_CODE, LOG_FORMAT, LOGS_DIRECTORY, OUTPUT_DIRECTORY, SUCCESS_EXIT_CODE,
-    TEMPERATURE, TOP_K, TOP_P, TOTAL_BLOCKS, UNAIDED_EXPERIMENT, VLLM_TIMEOUT_SECONDS,
+    TEMPERATURE, TOP_K, TOP_P, DEFAULT_BLOCKS, VLLM_TIMEOUT_SECONDS,
 )
 from discovery_execution.harness.models import BackendConfig, RunConfig
 from discovery_execution.harness.openai_client import OpenAIClient
@@ -31,13 +31,11 @@ def parse_arguments(arguments: list[str]) -> RunConfig:
     parser.add_argument("--batch-size", type=int,
                         help=f"Maximum concurrent trajectories (model defaults: {DEFAULT_BATCH_SIZES})")
     args = vars(parser.parse_args(arguments))
-    if args["compute_multiplier_k"] is None:
-        if args["experiment"] == UNAIDED_EXPERIMENT:
-            parser.error("unaided requires --compute-multiplier-k")
-        args["compute_multiplier_k"] = TOTAL_BLOCKS
+    if args["compute_multiplier_k"] < 1:
+        parser.error("compute-multiplier-k must be positive")
     if args["batch_size"] is None:
         long_batch, short_batch = DEFAULT_BATCH_SIZES[args["model"]]
-        args["batch_size"] = min(short_batch, long_batch * TOTAL_BLOCKS // args["compute_multiplier_k"])
+        args["batch_size"] = max(1, min(short_batch, long_batch * DEFAULT_BLOCKS // args["compute_multiplier_k"]))
     try:
         return RunConfig(
             **args, datasets_directory=DATASETS_DIRECTORY, output_directory=OUTPUT_DIRECTORY,

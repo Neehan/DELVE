@@ -6,18 +6,18 @@ import pytest
 from jinja2 import Template
 
 from discovery_execution.cli.run import parse_arguments
-from discovery_execution.harness.constants import DEFAULT_BATCH_SIZES, SUPPORTED_MODELS
+from discovery_execution.harness.constants import DEFAULT_BATCH_SIZES, DEFAULT_BLOCKS, SUPPORTED_MODELS
 from discovery_execution.vllm.constants import DEFAULT_PORT, KV_CACHE_DTYPE, MAX_PORT, PARALLELISM
 from discovery_execution.vllm.serve import build_command
 
 
 @pytest.mark.parametrize("model", SUPPORTED_MODELS)
 def test_serving_command(model: str) -> None:
-    """All model aliases use FP8 cache and the full context without response parsers."""
+    """All model aliases use the configured cache and shared context without response parsers."""
     command = build_command(model, DEFAULT_PORT, None)
     assert command[:3] == ["vllm", "serve", SUPPORTED_MODELS[model]]
     assert command[command.index("--served-model-name") + 1] == model
-    assert command[command.index("--max-model-len") + 1] == "131072"
+    assert command[command.index("--max-model-len") + 1] == "81920"
     assert command[command.index("--kv-cache-dtype") + 1] == KV_CACHE_DTYPE[model]
     assert command[command.index(f"--{PARALLELISM[model]}-parallel-size") + 1] == "2"
     assert not {"--reasoning-parser", "--enable-auto-tool-choice", "--quantization"} & set(command)
@@ -43,7 +43,7 @@ def test_invalid_port(port: int) -> None:
 def test_concurrency_selection(model: str, override: int | None) -> None:
     """Collection and serving share model defaults and honor explicit concurrency."""
     arguments = ["--model", model, "--competition", "aime", "--year", "2024",
-                 "--experiment", "unaided", "--compute-multiplier-k", "8", "--seeds", "0"]
+                 "--experiment", "unaided", "--seeds", "0"]
     expected = DEFAULT_BATCH_SIZES[model][0]
     if override is not None:
         arguments.extend(["--batch-size", str(override)])
@@ -60,11 +60,22 @@ def test_batch_scales_with_budget(model: str) -> None:
     long_batch, short_batch = DEFAULT_BATCH_SIZES[model]
     sizes = [parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
                               "--experiment", "unaided", "--compute-multiplier-k", str(k),
-                              "--seeds", "0"]).batch_size for k in range(1, 9)]
+                              "--seeds", "0"]).batch_size for k in range(1, DEFAULT_BLOCKS + 1)]
     oracle = parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
                               "--experiment", "oracle-execution", "--seeds", "0"])
-    assert sizes[0] == short_batch and sizes[-1] == oracle.batch_size == long_batch
+    assert sizes[0] == min(short_batch, long_batch * DEFAULT_BLOCKS)
+    assert sizes[-1] == oracle.batch_size == long_batch
     assert sizes == sorted(sizes, reverse=True)
+
+
+@pytest.mark.parametrize("model", SUPPORTED_MODELS)
+def test_large_explicit_budget_keeps_a_worker(model: str) -> None:
+    """Budget scaling cannot round concurrency down to zero for an explicit large horizon."""
+    default_batch, _ = DEFAULT_BATCH_SIZES[model]
+    config = parse_arguments(["--model", model, "--competition", "aime", "--year", "2024",
+                              "--experiment", "unaided", "--compute-multiplier-k",
+                              str(default_batch * DEFAULT_BLOCKS + 1), "--seeds", "0"])
+    assert config.batch_size == 1
 
 
 @pytest.mark.parametrize("concurrency", [0, -1])

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from discovery_execution.harness.constants import (
-    COMPETITIONS, SAFE_COMPONENT, SUPPORTED_MODELS, TOTAL_BLOCKS, TOTAL_OUTPUT_TOKENS,
+    COMPETITIONS, SAFE_COMPONENT, SUPPORTED_MODELS,
 )
 
 
@@ -70,7 +70,7 @@ class DatasetConfig(BaseModel):
 
 
 class RunConfig(DatasetConfig):
-    """Validated run selection with a chosen unaided budget or fixed eight-block oracle budget."""
+    """Validated run selection with an explicit output budget and optional sketch injection."""
 
     output_directory: Path
     model: str
@@ -86,12 +86,10 @@ class RunConfig(DatasetConfig):
         """Reject invalid run combinations before reading or generating data."""
         if self.model not in SUPPORTED_MODELS:
             raise ValueError(f"unsupported model: {self.model}; choose from {', '.join(SUPPORTED_MODELS)}")
-        if not 1 <= self.compute_multiplier_k <= TOTAL_BLOCKS:
-            raise ValueError("compute-multiplier-k must be 1..8")
-        if self.experiment == "oracle-execution" and self.compute_multiplier_k != TOTAL_BLOCKS:
-            raise ValueError("oracle-execution requires compute-multiplier-k=8")
-        if not 0 <= self.inject_sketch_at < TOTAL_BLOCKS:
-            raise ValueError("injection must be 0..7")
+        if self.compute_multiplier_k < 1:
+            raise ValueError("compute-multiplier-k must be positive")
+        if not 0 <= self.inject_sketch_at < self.compute_multiplier_k:
+            raise ValueError("injection must be nonnegative and before the output budget")
         if self.solution_index is not None and self.solution_index < 0:
             raise ValueError("solution index must be nonnegative")
         if self.batch_size < 1:
@@ -179,7 +177,7 @@ class RunState(BaseModel):
     @model_validator(mode="after")
     def validate_state(self) -> "RunState":
         """Reject corrupted counters and invalid checkpoint references."""
-        if not 0 <= self.output_tokens <= TOTAL_OUTPUT_TOKENS:
+        if self.output_tokens < 0:
             raise ValueError("invalid checkpoint token count")
         for checkpoint in self.checkpoints:
             if not 0 < checkpoint.message_count <= len(self.messages):

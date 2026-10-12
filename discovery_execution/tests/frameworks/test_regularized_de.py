@@ -26,8 +26,8 @@ def beta_quadrature(a: float, b: float) -> list[NDArray[np.float64]]:
 @pytest.mark.parametrize("successes", [0, 6, 24])
 def test_joint_likelihood_and_all_allocations_match_quadrature(successes: int) -> None:
     """Integrate the coupled likelihood directly, including extreme short counts and excluded categories."""
-    prior = RDEPrior(BetaParameters(0.7, 2.3), DirichletParameters([1.2, 0.8, 0, 0, 0, 0, 0, 0, 1.5]))
-    counts = np.array([[2, 1, 0, 0, 0, 0, 0, 0, 1]], dtype=float)
+    prior = RDEPrior(BetaParameters(0.7, 2.3), DirichletParameters([1.2, 0.8, *([0] * (TOTAL_BUDGET - 2)), 1.5]))
+    counts = np.array([[2, 1, *([0] * (TOTAL_BUDGET - 2)), 1]], dtype=float)
     params = RDEParameters(prior, successes, 24, [int(value) for value in counts[0]])
     discovery, discovery_weights = beta_quadrature(prior.discovery.a, prior.discovery.b)
     first, first_weights = beta_quadrature(3.2, 4.3)
@@ -59,8 +59,8 @@ def test_joint_likelihood_and_all_allocations_match_quadrature(successes: int) -
 
 def test_fit_uses_ten_starts_and_saved_parameters_reproduce_predictions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Check active support, all ten initializations, and reconstruction without needing the fitted instance."""
-    # Total first-completion counts for ROWS include unsolved and exclude four unobserved blocks.
-    total_oracle_counts = np.array([3, 2, 0, 1, 0, 1, 0, 0, 5])
+    # Total first-completion counts for ROWS include unsolved and exclude two unobserved blocks.
+    total_oracle_counts = np.array([3, 2, 0, 1, 0, 6])
     active = total_oracle_counts > 0
     shapes = np.array([0.7, 2.3, *([1.2] * int(active.sum()))])
     optimizer = Mock(return_value=OptimizeResult(success=True, fun=1.0, x=np.log(shapes), message="converged"))
@@ -133,7 +133,7 @@ def test_near_certain_predictions_remain_valid_at_optimizer_bounds(successes: in
         BetaParameters(float(upper), float(lower)),
         DirichletParameters([float(upper), *([float(lower)] * TOTAL_BUDGET)]),
     )
-    params = RDEParameters(prior, successes, 24, [1, 1, 0, 0, 0, 0, 0, 0, 2])
+    params = RDEParameters(prior, successes, 24, [1, 1, *([0] * (TOTAL_BUDGET - 2)), 2])
     framework = RegularizedDiscoveryExecution()
     for n in NUM_ARMS:
         for k in range(1, TOTAL_BUDGET // n + 1):

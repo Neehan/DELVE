@@ -12,10 +12,10 @@ from discovery_execution.tests.frameworks.constants import EXPECTED_ALLOCATIONS,
 
 
 @pytest.mark.parametrize("attempts, successes", [
-    [0, [0, 0, 0, 0, 0, 0, 0, 0]],
+    [0, [0, 0, 0, 0, 0]],
     [4, [1, 2]],
-    [4, [1, 2, 2, 3, 3, 3, 3, 5]],
-    [4, [1, 2, 1, 3, 3, 3, 3, 3]],
+    [4, [1, 2, 2, 3, 5]],
+    [4, [1, 2, 1, 3, 3]],
 ])
 def test_observation_rejects_invalid_oracle_curve(attempts: int, successes: list[int]) -> None:
     """Oracle curves need positive attempts, every checkpoint, bounded counts, and cumulative successes."""
@@ -53,7 +53,7 @@ def test_de_joint_boundary_and_unidentified_discovery() -> None:
         assert params.epsilon == [count / observation.oracle_attempts for count in observation.oracle_successes]
     predictions = {(row.problem_id, row.n, row.k): row.success_probability for row in framework.predict()}
     assert predictions["p1", 2, 2] == pytest.approx(1 - (5 / 14) ** 2)
-    assert predictions["p3", 2, 4] == 0
+    assert predictions["p3", 2, 2] == 0
     equal_rates = replace(ROWS[0], short_successes=6)
     framework.fit([equal_rates])
     assert framework.params[equal_rates].alpha == 1
@@ -63,7 +63,7 @@ def test_de_joint_boundary_and_unidentified_discovery() -> None:
 def test_de_saturated_execution_reduces_to_geometric() -> None:
     """When oracle execution always finishes immediately, DE equals the geometric model's formula."""
     framework = DiscoveryExecution()
-    framework.fit([replace(ROWS[0], oracle_successes=[4, 4, 4, 4, 4, 4, 4, 4])])
+    framework.fit([replace(ROWS[0], oracle_successes=[4, 4, 4, 4, 4])])
     short_rate = ROWS[0].short_successes / ROWS[0].short_attempts
     for prediction in framework.predict():
         assert prediction.success_probability == pytest.approx(1 - (1 - short_rate) ** (prediction.n * prediction.k))
