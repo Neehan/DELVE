@@ -32,7 +32,8 @@ PARALLELISM = {
 QWEN_YARN = {"rope_parameters": {"rope_type": "yarn", "factor": 4.0,
                                 "original_max_position_embeddings": 32768, "rope_theta": 1000000}}
 MODEL_ARGUMENTS = {
-    "qwen3-4b-instruct-2507": [],
+    # Larger prefill chunks for the five-block workload on 2x L40S.
+    "qwen3-4b-instruct-2507": ["--max-num-batched-tokens", "8192"],
     "qwen3-1.7b": ["--hf-overrides", json.dumps(QWEN_YARN),
                    "--chat-template", str(TEMPLATES_DIRECTORY / "qwen3.jinja")],
     "ministral-3-3b-instruct-2512": ["--tokenizer-mode", "mistral", "--config-format", "mistral",
