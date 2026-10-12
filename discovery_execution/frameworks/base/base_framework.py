@@ -38,7 +38,7 @@ class BaseFramework[Parameters: BaseParameters]:
         return {"parameters": parameters}
 
     def predict(self) -> list[BasePrediction]:
-        """Predict each problem for N=1,2,4 and measured depths with N*K <= 8."""
+        """Predict each problem for N=1,2,4 and measured depths within the configured total budget."""
         if not self.params:
             raise RuntimeError("fit the framework before predicting")
 

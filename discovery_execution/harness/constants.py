@@ -9,9 +9,9 @@ LOGS_DIRECTORY = Path("logs")
 PROMPTS_DIRECTORY = Path("discovery_execution/prompts")
 ENV_FILE = Path(".env")
 OUTPUT_TOKENS_PER_BLOCK = 8192
-TOTAL_BLOCKS = 8
-TOTAL_OUTPUT_TOKENS = OUTPUT_TOKENS_PER_BLOCK * TOTAL_BLOCKS
-MIN_CONTEXT_TOKENS = 100_000
+DEFAULT_BLOCKS = 5
+MAX_BLOCKS = 8
+MIN_CONTEXT_TOKENS = 81_920
 UNAIDED_EXPERIMENT = "unaided"
 ORACLE_EXECUTION_EXPERIMENT = "oracle-execution"
 SEED_MODULUS = 2**31
@@ -25,9 +25,8 @@ SUPPORTED_MODELS = {
 }
 # Require problem IDs to be single folder names without separators or traversal paths.
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-# (k=8 batch, k=1 batch) tuned on 2x L40S. KV use grows with k, so other budgets scale the k=8
-# batch by 8/k, capped at the k=1 batch. Standalone serving defaults to the k=8 batch;
-# Slurm passes the selected harness batch explicitly to --max-num-seqs.
+# (Default-budget batch, one-block cap) on 2x L40S; shorter runs allow larger batches.
+# Slurm passes the selected harness batch to --max-num-seqs.
 DEFAULT_BATCH_SIZES = {
     "qwen3-4b-instruct-2507": (24, 128),
     "qwen3-1.7b": (32, 128),

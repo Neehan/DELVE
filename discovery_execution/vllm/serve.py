@@ -5,7 +5,7 @@ import shlex
 import sys
 from argparse import ArgumentParser
 
-from discovery_execution.harness.constants import DEFAULT_BATCH_SIZES, SUPPORTED_MODELS
+from discovery_execution.harness.constants import DEFAULT_BATCH_SIZES, DEFAULT_BLOCKS, SUPPORTED_MODELS
 from discovery_execution.vllm.constants import (
     DEFAULT_PORT, GPU_COUNT, GPU_MEMORY_UTILIZATION, HOST, KV_CACHE_DTYPE, MAX_MODEL_LEN,
     MAX_PORT, MODEL_ARGUMENTS, PARALLELISM,
@@ -36,7 +36,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, choices=SUPPORTED_MODELS)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--max-num-seqs", type=int,
-                        help="Maximum active sequences (default: the model's k=8 batch)")
+                        help=f"Maximum active sequences (default: the model's k={DEFAULT_BLOCKS} batch)")
     args = parser.parse_args()
     try:
         command = build_command(args.model, args.port, args.max_num_seqs)

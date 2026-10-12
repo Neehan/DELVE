@@ -12,7 +12,7 @@ from typing import Any
 import zstandard
 
 from discovery_execution.harness.constants import (
-    CHECKPOINT_FILENAME, CONVERSATION_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME, TOTAL_BLOCKS,
+    CHECKPOINT_FILENAME, CONVERSATION_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME,
 )
 from discovery_execution.harness.models import RunState
 
@@ -69,13 +69,15 @@ class Storage:
 
     def read_checkpoints(self) -> list[dict[str, Any]]:
         """Read consecutive boundary snapshots, validating names against their token counts."""
-        paths = sorted(self.directory.glob(CHECKPOINT_FILENAME.format(k="*")))
+        prefix, suffix = CHECKPOINT_FILENAME.split("{k}")
+        paths = sorted(self.directory.glob(CHECKPOINT_FILENAME.format(k="*")),
+                       key=lambda path: int(path.name.removeprefix(prefix).removesuffix(suffix)))
         if not paths:
             raise FileNotFoundError(self.directory / CHECKPOINT_FILENAME.format(k=1))
         snapshots = []
         for block, path in enumerate(paths, start=1):
             snapshot = json.loads(zstandard.decompress(path.read_bytes()))
-            if (block > TOTAL_BLOCKS or path.name != CHECKPOINT_FILENAME.format(k=block)
+            if (path.name != CHECKPOINT_FILENAME.format(k=block)
                     or snapshot["output_tokens"] != block * OUTPUT_TOKENS_PER_BLOCK):
                 raise ValueError(f"missing or invalid checkpoint boundary: {path}")
             snapshots.append(snapshot)

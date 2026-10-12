@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from discovery_execution.harness.constants import COMPETITIONS, SAFE_COMPONENT, SUPPORTED_MODELS, TOTAL_BLOCKS
+from discovery_execution.harness.constants import COMPETITIONS, MAX_BLOCKS, SAFE_COMPONENT, SUPPORTED_MODELS
 
 
 class BinaryGrade(BaseModel):
@@ -39,12 +39,10 @@ class AuditRecord(BaseModel):
             raise ValueError("invalid audit model or seed")
         if not SAFE_COMPONENT.fullmatch(self.problem_id):
             raise ValueError("invalid audit problem ID")
-        if not 1 <= self.checkpoint_multiplier_k <= self.compute_multiplier_k <= TOTAL_BLOCKS:
+        if not 1 <= self.checkpoint_multiplier_k <= self.compute_multiplier_k <= MAX_BLOCKS:
             raise ValueError("invalid audit checkpoint or compute multiplier")
-        if not 0 <= self.inject_sketch_at < TOTAL_BLOCKS or self.solution_index < 0:
+        if not 0 <= self.inject_sketch_at < self.compute_multiplier_k or self.solution_index < 0:
             raise ValueError("invalid audit sketch selection")
         if self.experiment == "unaided" and (self.inject_sketch_at or self.solution_index):
             raise ValueError("unaided audits cannot have sketch settings")
-        if self.experiment == "oracle-execution" and self.compute_multiplier_k != TOTAL_BLOCKS:
-            raise ValueError("oracle audits require an eight-block budget")
         return self

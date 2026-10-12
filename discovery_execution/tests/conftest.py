@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from discovery_execution.harness.constants import (
-    MIN_CONTEXT_TOKENS, OUTPUT_TOKENS_PER_BLOCK, TOTAL_BLOCKS,
+    MIN_CONTEXT_TOKENS, OUTPUT_TOKENS_PER_BLOCK, DEFAULT_BLOCKS,
 )
 from discovery_execution.harness.models import BackendConfig, Checkpoint, DatasetConfig, GenerationRequest, Problem, RunConfig, RunState, Solution
 from discovery_execution.harness.openai_client import OpenAIClient
@@ -108,7 +108,7 @@ def model_name() -> str:
 @pytest.fixture
 def compute_multiplier_k() -> int:
     """Use the full budget unless a test selects a shorter unaided run."""
-    return TOTAL_BLOCKS
+    return DEFAULT_BLOCKS
 
 
 @pytest.fixture

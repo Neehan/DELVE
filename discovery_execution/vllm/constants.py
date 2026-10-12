@@ -3,10 +3,12 @@
 import json
 from pathlib import Path
 
+from discovery_execution.harness.constants import MIN_CONTEXT_TOKENS
+
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 MAX_PORT = 65535
-MAX_MODEL_LEN = 131072
+MAX_MODEL_LEN = MIN_CONTEXT_TOKENS
 GPU_COUNT = 2
 GPU_MEMORY_UTILIZATION = 0.92
 KV_CACHE_DTYPE = {

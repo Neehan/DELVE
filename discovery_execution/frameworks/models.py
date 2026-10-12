@@ -59,7 +59,7 @@ class RSGParameters(SGParameters):
 
 @dataclass(frozen=True)
 class DirichletParameters(BaseParameters):
-    """Store execution concentrations for blocks 1..8 and unsolved; zero marks an excluded category."""
+    """Store execution concentrations for each configured block and unsolved; zero marks an excluded category."""
 
     concentrations: list[float]
 

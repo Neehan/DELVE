@@ -5,7 +5,7 @@ from argparse import ArgumentParser, Namespace
 
 from discovery_execution.audit.runner import AuditRunner
 from discovery_execution.cli.arguments import add_selection_arguments
-from discovery_execution.harness.constants import ORACLE_EXECUTION_EXPERIMENT, OUTPUT_DIRECTORY, TOTAL_BLOCKS
+from discovery_execution.harness.constants import ORACLE_EXECUTION_EXPERIMENT, OUTPUT_DIRECTORY
 from discovery_execution.harness.storage import model_output_directory
 
 
@@ -21,8 +21,10 @@ def parse_arguments(arguments: list[str]) -> Namespace:
         parser.error("seeds must be nonnegative")
     if args.inject_sketch_at is not None and args.experiment != ORACLE_EXECUTION_EXPERIMENT:
         parser.error("--inject-sketch-at requires --experiment oracle-execution")
-    if args.experiment == ORACLE_EXECUTION_EXPERIMENT and args.compute_multiplier_k not in (None, TOTAL_BLOCKS):
-        parser.error("oracle-execution requires compute-multiplier-k=8")
+    if args.inject_sketch_at is not None:
+        if args.inject_sketch_at < 0 or (args.compute_multiplier_k is not None
+                                       and args.inject_sketch_at >= args.compute_multiplier_k):
+            parser.error("injection must be nonnegative and before the output budget")
     return args
 
 
