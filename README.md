@@ -4,6 +4,10 @@ Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` ha
 
 Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
+The planned critic takes the partial conversation, current phase, and remaining budget, and predicts the probability that the last boxed answer will be correct when that budget ends.
+
+Training labels come from continuing the same self-refinement harness and grading the last boxed answer: 1 if correct, 0 otherwise; earlier correct answers do not override the final grade.
+
 **Environment**
 
 Run commands from the repository root. Copy `.env.example` to `.env` and configure:
@@ -94,7 +98,7 @@ Use that same name for `--model`; requests, saved settings, and output folders r
 ```bash
 uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
   --model qwen3-4b-instruct-2507 --experiment unaided --compute-multiplier-k 1 \
-  --seeds {0..23}
+  --seeds {0..15}
 
 uv run python -m discovery_execution.cli.run --competition aime --year 2024 \
   --model qwen3-4b-instruct-2507 --experiment oracle-execution \
@@ -107,12 +111,21 @@ Both experiments default to 5× (40,960 output tokens). Set `--compute-multiplie
 
 Results go in `output/`, logs in `logs/`. Each trajectory stores `meta.json` (settings), `conversation.json.zst` (resume state), one snapshot per boundary (`checkpoint_1x.json.zst`, `checkpoint_2x.json.zst`, …), and `audit.json` (grades). Auditing requires the local dataset and also writes a combined `audit.jsonl` per arm.
 
+Branch from an existing unaided checkpoint with the same model and sampling settings:
+
+```bash
+uv run python -m discovery_execution.cli.run --competition aime --year 2024 --model qwen3-1.7b \
+  --experiment continue --source-arm unaided-5x --source-seed 0 --continue-at 1 --seeds 0 1 2 3
+```
+
+Use `--experiment continue-oracle` to inject a sketch at that same prefix; its default solution is selected by the source seed, shared across branches. The 5× default budget includes the prefix. Outputs use `<arm>/<problem>/seed_<source-seed>/branch_<seed>/`, with arms `continue-at-1x` or `continue-oracle-at-1x`. Only post-fork checkpoints are saved, on the original timeline. Audit accepts the same source selectors; continuation arms are excluded from DE fitting. Reusing a branch directory with different source settings or budget fails.
+
 After generation and auditing finish, run `bash discovery_execution/scripts/upload_outputs.sh` from a network-enabled shell. It uploads these artifacts to `HF_OUTPUTS_REPO`, preserving paths below `output/` and excluding locks and temporary files. A missing repository is created private; existing visibility is unchanged. Rerunning updates matching paths without deleting remote-only files.
 
 On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
 
 ```bash
-mkdir -p logs/slurm && sbatch discovery_execution/scripts/experiment.sbatch --model qwen3-1.7b --competition aime --year 2024 --experiment unaided --compute-multiplier-k 1 --seeds {0..23}
+mkdir -p logs/slurm && sbatch discovery_execution/scripts/experiment.sbatch --model qwen3-1.7b --competition aime --year 2024 --experiment unaided --compute-multiplier-k 1 --seeds {0..15}
 ```
 
 Grades use DE's `correctness.score` field, restricted to 0 or 1. Each checkpoint's last boxed answer is checked with Math-Verify, following [Qwen's final-box convention](https://github.com/QwenLM/Qwen2.5-Math/blob/main/evaluation/parser.py). Missing or unparseable answers score 0. Raw audits preserve regressions; only the framework turns scores `1, 0, 0` into cumulative success `1, 1, 1`.
@@ -126,6 +139,6 @@ uv run python -m discovery_execution.cli.frameworks --competition aime --year 20
   --model qwen3-4b-instruct-2507
 ```
 
-Use `--frameworks sg de` to select methods; all four run by default. Fitting requires at least 24 complete short seeds and 3 complete five-block oracle seeds per problem. R-DE additionally needs both first-block successes and later/unsolved oracle outcomes. Long unaided and delayed-sketch arms are excluded from fitting.
+Use `--frameworks sg de` to select methods; all four run by default. Fitting requires at least 16 complete short seeds and 3 complete five-block oracle seeds per problem. R-DE additionally needs both first-block successes and later/unsolved oracle outcomes. Long unaided and delayed-sketch arms are excluded from fitting.
 
 Outputs are `frameworks/<method>/fit.json` and `predictions.jsonl` under the model directory. Multiple competitions and years select their cross product and share regularized priors. Evaluate forecasts against separately collected unaided 2×–5× arms.

@@ -8,8 +8,11 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from discovery_execution.harness.constants import (
-    COMPETITIONS, MAX_BLOCKS, SAFE_COMPONENT, SUPPORTED_MODELS,
+    COMPETITIONS, CONTINUATION_EXPERIMENTS, MAX_BLOCKS, NO_SOURCE, ORACLE_EXPERIMENTS,
+    SAFE_COMPONENT, SOURCE_ARMS, SUPPORTED_MODELS,
 )
+
+Experiment = Literal["unaided", "oracle-execution", "continue", "continue-oracle"]
 
 
 class Solution(BaseModel):
@@ -74,12 +77,15 @@ class RunConfig(DatasetConfig):
 
     output_directory: Path
     model: str
-    experiment: Literal["unaided", "oracle-execution"]
+    experiment: Experiment
     compute_multiplier_k: int
     inject_sketch_at: int
     solution_index: int | None
     seeds: list[int]
     batch_size: int
+    source_arm: str | None = NO_SOURCE
+    source_seed: int | None = NO_SOURCE
+    continue_at: int | None = NO_SOURCE
 
     @model_validator(mode="after")
     def validate_selection(self) -> "RunConfig":
@@ -96,8 +102,27 @@ class RunConfig(DatasetConfig):
             raise ValueError("batch size must be positive")
         if not self.seeds or min(self.seeds) < 0 or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be unique nonnegative integers")
-        if self.experiment == "unaided" and (self.inject_sketch_at or self.solution_index):
-            raise ValueError("sketch options apply only to oracle-execution")
+        if self.experiment not in ORACLE_EXPERIMENTS and (self.inject_sketch_at or self.solution_index is not None):
+            raise ValueError("sketch options apply only to oracle experiments")
+        return self
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "RunConfig":
+        """Require an explicit unaided parent and leave room for new output after the fork."""
+        selection = (self.source_arm, self.source_seed, self.continue_at)
+        if self.experiment not in CONTINUATION_EXPERIMENTS:
+            if any(value is not None for value in selection):
+                raise ValueError("source options require a continuation experiment")
+            return self
+        if self.source_arm is None or self.source_seed is None or self.continue_at is None:
+            raise ValueError("continuations require --source-arm, --source-seed, and --continue-at")
+        if self.source_arm not in SOURCE_ARMS or self.source_seed < 0:
+            raise ValueError("source must be an unaided arm with a nonnegative seed")
+        source_budget = int(self.source_arm.removeprefix("unaided-").removesuffix("x"))
+        if not 1 <= self.continue_at <= source_budget or self.continue_at >= self.compute_multiplier_k:
+            raise ValueError("continue-at must be a source checkpoint before the destination budget")
+        if self.inject_sketch_at:
+            raise ValueError("continuation oracle injection uses --continue-at, not --inject-sketch-at")
         return self
 
 

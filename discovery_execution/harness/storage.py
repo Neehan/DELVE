@@ -14,7 +14,7 @@ import zstandard
 from discovery_execution.harness.constants import (
     CHECKPOINT_FILENAME, CONVERSATION_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME,
 )
-from discovery_execution.harness.models import RunState
+from discovery_execution.harness.models import Checkpoint, RunState
 
 
 def model_output_directory(root: Path, competition: str, year: int, model: str) -> Path:
@@ -67,15 +67,42 @@ class Storage:
             logging.info("Skipped completed trajectory %s", self.directory)
         return state
 
-    def read_checkpoints(self) -> list[dict[str, Any]]:
+    def load_source_prefix(self, source: Path, metadata: dict[str, Any]) -> RunState:
+        """Reconstruct the fork from an unaided conversation and its immutable audit snapshot, read-only."""
+        settings = json.loads((source / META_FILENAME).read_text(encoding="utf-8"))
+        expected = {key: metadata[key] for key in ("competition", "year", "model", "problem_id")}
+        expected.update(experiment="unaided", arm=metadata["source_arm"], seed=metadata["source_seed"],
+                        compute_multiplier_k=int(metadata["source_arm"].removeprefix("unaided-").removesuffix("x")))
+        if any(settings[key] != value for key, value in expected.items()):
+            raise ValueError(f"source settings differ: {source}")
+        if any(settings["backend"][key] != metadata["backend"][key] for key in ("temperature", "top_p", "top_k")):
+            raise ValueError(f"source sampling settings differ: {source}")
+        block = metadata["continue_at"]
+        tokens = block * OUTPUT_TOKENS_PER_BLOCK
+        state = RunState.model_validate_json(zstandard.decompress((source / CONVERSATION_FILENAME).read_bytes()))
+        boundaries = [checkpoint for checkpoint in state.checkpoints if checkpoint.output_tokens == tokens]
+        if len(boundaries) != 1 or state.output_tokens < tokens:
+            raise ValueError(f"source checkpoint {block}x is unavailable: {source}")
+        expected_snapshot = self._build_checkpoint_snapshot(state, boundaries[0])
+        snapshot = json.loads(zstandard.decompress((source / CHECKPOINT_FILENAME.format(k=block)).read_bytes()))
+        if snapshot != expected_snapshot:
+            raise ValueError(f"source snapshot disagrees with conversation: {source}")
+        requests = [request for request in state.requests if request["output_tokens"] <= tokens]
+        if not requests or requests[-1]["output_tokens"] != tokens or any(request["injected"] for request in requests):
+            raise ValueError(f"source request history does not describe an unaided boundary: {source}")
+        last = requests[-1]
+        return RunState(messages=expected_snapshot["messages"], output_tokens=tokens, phase=last["phase"], injected=False,
+                        response_finished=last["finish_reason"] == "stop", requests=requests, checkpoints=[])
+
+    def read_checkpoints(self, start_block: int) -> list[dict[str, Any]]:
         """Read consecutive boundary snapshots, validating names against their token counts."""
         prefix, suffix = CHECKPOINT_FILENAME.split("{k}")
         paths = sorted(self.directory.glob(CHECKPOINT_FILENAME.format(k="*")),
                        key=lambda path: int(path.name.removeprefix(prefix).removesuffix(suffix)))
         if not paths:
-            raise FileNotFoundError(self.directory / CHECKPOINT_FILENAME.format(k=1))
+            raise FileNotFoundError(self.directory / CHECKPOINT_FILENAME.format(k=start_block))
         snapshots = []
-        for block, path in enumerate(paths, start=1):
+        for block, path in enumerate(paths, start=start_block):
             snapshot = json.loads(zstandard.decompress(path.read_bytes()))
             if (path.name != CHECKPOINT_FILENAME.format(k=block)
                     or snapshot["output_tokens"] != block * OUTPUT_TOKENS_PER_BLOCK):
@@ -97,10 +124,14 @@ class Storage:
             path = self.directory / CHECKPOINT_FILENAME.format(k=block)
             if path.exists():
                 continue
-            messages = [dict(message) for message in state.messages[:checkpoint.message_count]]
-            messages[-1]["content"] = messages[-1]["content"][:checkpoint.last_message_chars]
-            snapshot = {"output_tokens": checkpoint.output_tokens, "messages": messages}
+            snapshot = self._build_checkpoint_snapshot(state, checkpoint)
             atomic_write(path, zstandard.compress(json.dumps(snapshot, ensure_ascii=False).encode("utf-8")))
+
+    def _build_checkpoint_snapshot(self, state: RunState, checkpoint: Checkpoint) -> dict[str, Any]:
+        """Copy only text visible at a boundary, excluding later responses and appended assistant tokens."""
+        messages = [dict(message) for message in state.messages[:checkpoint.message_count]]
+        messages[-1]["content"] = messages[-1]["content"][:checkpoint.last_message_chars]
+        return {"output_tokens": checkpoint.output_tokens, "messages": messages}
 
     def __enter__(self) -> "Storage":
         """Keep the trajectory lock for the lifetime of the run."""

@@ -16,6 +16,7 @@ from discovery_execution.harness.constants import (
 )
 from discovery_execution.harness.models import BackendConfig, Checkpoint, DatasetConfig, GenerationRequest, Problem, RunConfig, RunState, Solution
 from discovery_execution.harness.openai_client import OpenAIClient
+from discovery_execution.harness.runner import Runner
 from discovery_execution.cli.run import backend_configuration, parse_arguments
 
 
@@ -232,3 +233,27 @@ async def client(records: list[dict[str, Any]],
 
     async with make_client(respond) as model_client:
         yield model_client
+
+
+@pytest.fixture
+async def branch_source(make_run_config: Callable[[str, int], RunConfig], client: OpenAIClient) -> RunConfig:
+    """Collect a parent with a nonzero seed to distinguish parent and branch identities."""
+    config = make_run_config("unaided", 0).model_copy(update={"seeds": [1]})
+    assert await Runner(config, client).run()
+    return config
+
+
+@pytest.fixture
+def make_branch_config(branch_source: RunConfig, run_arguments: list[str]) -> Callable[[str, int], RunConfig]:
+    """Build continuation selections through the public CLI and retain temporary dataset paths."""
+    def create(experiment: str, block: int) -> RunConfig:
+        """Use two fresh branch seeds under the selected parent boundary."""
+        config = parse_arguments([
+            *run_arguments, "--experiment", experiment, "--source-arm", f"unaided-{branch_source.compute_multiplier_k}x",
+            "--source-seed", str(branch_source.seeds[0]), "--continue-at", str(block), "--seeds", "2", "3",
+            "--compute-multiplier-k", str(branch_source.compute_multiplier_k),
+        ])
+        return config.model_copy(update={"datasets_directory": branch_source.datasets_directory,
+                                         "output_directory": branch_source.output_directory,
+                                         "hf_repo": branch_source.hf_repo, "batch_size": 1})
+    return create

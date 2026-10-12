@@ -4,7 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from discovery_execution.harness.constants import COMPETITIONS, MAX_BLOCKS, SAFE_COMPONENT, SUPPORTED_MODELS
+from discovery_execution.harness.constants import (
+    COMPETITIONS, CONTINUATION_EXPERIMENTS, MAX_BLOCKS, NO_SOURCE, SAFE_COMPONENT, SOURCE_ARMS, SUPPORTED_MODELS,
+)
+from discovery_execution.harness.models import Experiment
 
 
 class BinaryGrade(BaseModel):
@@ -20,7 +23,7 @@ class AuditRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     dataset: str
     solver_model: str
-    experiment: Literal["unaided", "oracle-execution"]
+    experiment: Experiment
     compute_multiplier_k: int
     inject_sketch_at: int
     solution_index: int
@@ -28,6 +31,9 @@ class AuditRecord(BaseModel):
     seed: int
     checkpoint_multiplier_k: int
     correctness: BinaryGrade
+    source_arm: str | None = NO_SOURCE
+    source_seed: int | None = NO_SOURCE
+    continue_at: int | None = NO_SOURCE
 
     @model_validator(mode="after")
     def validate_record(self) -> "AuditRecord":
@@ -43,6 +49,24 @@ class AuditRecord(BaseModel):
             raise ValueError("invalid audit checkpoint or compute multiplier")
         if not 0 <= self.inject_sketch_at < self.compute_multiplier_k or self.solution_index < 0:
             raise ValueError("invalid audit sketch selection")
-        if self.experiment == "unaided" and (self.inject_sketch_at or self.solution_index):
+        if self.experiment in ("unaided", "continue") and (self.inject_sketch_at or self.solution_index):
             raise ValueError("unaided audits cannot have sketch settings")
+        return self
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "AuditRecord":
+        """Keep branch outcomes tied to their parent and exclude inherited checkpoints."""
+        if self.experiment not in CONTINUATION_EXPERIMENTS:
+            if any(value is not None for value in (self.source_arm, self.source_seed, self.continue_at)):
+                raise ValueError("source fields require continuation audits")
+            return self
+        if self.source_arm is None or self.source_arm not in SOURCE_ARMS or self.source_seed is None or self.source_seed < 0:
+            raise ValueError("invalid audit source arm or seed")
+        if self.continue_at is None or not 1 <= self.continue_at < self.checkpoint_multiplier_k:
+            raise ValueError("audit checkpoint must follow the fork")
+        source_budget = int(self.source_arm.removeprefix("unaided-").removesuffix("x"))
+        if self.continue_at > source_budget:
+            raise ValueError("audit fork exceeds the source budget")
+        if self.experiment == "continue-oracle" and self.inject_sketch_at != self.continue_at:
+            raise ValueError("oracle continuation must inject at the fork")
         return self

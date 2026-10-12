@@ -80,7 +80,7 @@ def test_resume_repairs_snapshots(tmp_path: Path, metadata: dict[str, Any], conv
     assert not (tmp_path / CHECKPOINT_FILENAME.format(k=1)).exists()
     with Storage(tmp_path) as storage:
         assert storage.load(metadata) == conversation
-        assert storage.read_checkpoints() == [
+        assert storage.read_checkpoints(1) == [
             {"output_tokens": conversation.output_tokens, "messages": conversation.messages}
         ]
 
@@ -90,14 +90,14 @@ def test_snapshots_exclude_later_continuation(tmp_path: Path, metadata: dict[str
     with Storage(tmp_path) as storage:
         storage.load(metadata)
         storage.save(conversation)
-        snapshots = storage.read_checkpoints()
+        snapshots = storage.read_checkpoints(1)
         conversation.messages[-1]["content"] += " LATER_RESPONSE"
         conversation.output_tokens += 1
         storage.save(conversation)
-        assert storage.read_checkpoints() == snapshots
+        assert storage.read_checkpoints(1) == snapshots
     with Storage(tmp_path) as storage:
         assert storage.load(metadata) == conversation
-        assert storage.read_checkpoints() == snapshots
+        assert storage.read_checkpoints(1) == snapshots
 
 
 def test_corrupt_conversation_does_not_resume_from_snapshots(tmp_path: Path, metadata: dict[str, Any],
@@ -137,7 +137,7 @@ def test_resume_writes_only_missing_snapshot(tmp_path: Path, metadata: dict[str,
     with Storage(tmp_path) as storage:
         storage.load(metadata)
         storage.save(conversation)
-        first_snapshot = storage.read_checkpoints()[0]
+        first_snapshot = storage.read_checkpoints(1)[0]
         conversation.messages[-1]["content"] += " SECOND_BLOCK"
         conversation.output_tokens = 2 * OUTPUT_TOKENS_PER_BLOCK
         conversation.checkpoints.append(conversation.checkpoints[0].model_copy(update={
@@ -152,7 +152,7 @@ def test_resume_writes_only_missing_snapshot(tmp_path: Path, metadata: dict[str,
     with Storage(tmp_path) as storage:
         assert storage.load(metadata) == conversation
         assert writes == [second]
-        snapshots = storage.read_checkpoints()
+        snapshots = storage.read_checkpoints(1)
         assert snapshots == [first_snapshot, {"output_tokens": conversation.output_tokens, "messages": conversation.messages}]
         writes.clear()
         storage.load(metadata)
@@ -167,4 +167,4 @@ def test_invalid_snapshot_boundary_fails(tmp_path: Path, block: int, tokens: int
     path.write_bytes(zstandard.compress(json.dumps(snapshot).encode("utf-8")))
     with Storage(tmp_path) as storage:
         with pytest.raises(ValueError, match="checkpoint boundary"):
-            storage.read_checkpoints()
+            storage.read_checkpoints(1)

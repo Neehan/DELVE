@@ -3,11 +3,18 @@
 import json
 import os
 import signal
+import socket
 import subprocess
+import sys
 import time
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+
+from discovery_execution.cli.audit import parse_arguments as parse_audit
 
 SCRIPT = Path("discovery_execution/scripts/experiment.sbatch").resolve()
 
@@ -60,3 +67,22 @@ def test_termination_stops_children(slurm_environment: dict[str, str], tmp_path:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+
+
+@pytest.mark.parametrize("experiment", ["continue", "continue-oracle"])
+def test_branch_audit_arguments(experiment: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the actual embedded CLI selection to verify branch filters reach the audit command."""
+    import_context: dict[str, object] = {"__name__": "__main__"}
+    script = SCRIPT.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    monkeypatch.setattr(sys, "argv", ["-", "--model", "qwen3-1.7b", "--competition", "aime", "--year", "2024",
+                                     "--experiment", experiment, "--source-arm", "unaided-5x", "--source-seed", "1",
+                                     "--continue-at", "2", "--seeds", "0", "3"])
+    listener = MagicMock()
+    listener.__enter__.return_value.getsockname.return_value = ("127.0.0.1", 34567)
+    monkeypatch.setattr(socket, "socket", MagicMock(return_value=listener))
+    output = StringIO()
+    with redirect_stdout(output):
+        exec(compile(script, str(SCRIPT), "exec"), import_context)
+    audit = parse_audit(output.getvalue().splitlines()[1].split())
+    assert audit.experiment == experiment and audit.source_arm == "unaided-5x"
+    assert audit.source_seed == 1 and audit.continue_at == 2 and audit.seeds == [0, 3]
