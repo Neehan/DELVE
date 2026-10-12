@@ -67,16 +67,16 @@ class Storage:
             logging.info("Skipped completed trajectory %s", self.directory)
         return state
 
-    def load_source_prefix(self, metadata: dict[str, Any]) -> RunState:
+    def load_source_prefix(self, source: Path, metadata: dict[str, Any]) -> RunState:
         """Reconstruct the fork from an unaided conversation and its immutable audit snapshot, read-only."""
-        source = (self.directory.parents[3] / metadata["source_arm"] / metadata["problem_id"]
-                  / f"seed_{metadata['source_seed']}")
         settings = json.loads((source / META_FILENAME).read_text(encoding="utf-8"))
-        expected = {key: metadata[key] for key in ("competition", "year", "model", "problem_id", "backend")}
+        expected = {key: metadata[key] for key in ("competition", "year", "model", "problem_id")}
         expected.update(experiment="unaided", arm=metadata["source_arm"], seed=metadata["source_seed"],
                         compute_multiplier_k=int(metadata["source_arm"].removeprefix("unaided-").removesuffix("x")))
         if any(settings[key] != value for key, value in expected.items()):
             raise ValueError(f"source settings differ: {source}")
+        if any(settings["backend"][key] != metadata["backend"][key] for key in ("temperature", "top_p", "top_k")):
+            raise ValueError(f"source sampling settings differ: {source}")
         block = metadata["continue_at"]
         tokens = block * OUTPUT_TOKENS_PER_BLOCK
         state = RunState.model_validate_json(zstandard.decompress((source / CONVERSATION_FILENAME).read_bytes()))

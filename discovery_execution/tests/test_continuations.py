@@ -241,3 +241,26 @@ async def test_source_seed_changes_branch_sampling(make_branch_config: Callable[
         await refinement.run()
         seeds.append(records[begin]["payload"]["seed"])
     assert seeds[0] != seeds[1]
+
+
+async def test_branch_allows_different_source_timeout(make_branch_config: Callable[[str, int], RunConfig],
+                                                       client: OpenAIClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request timeout change does not alter the source's sampling distribution."""
+    config = make_branch_config("continue", 2)
+    backend = client.configuration.model_copy(update={"timeout": client.configuration.timeout * 2})
+    monkeypatch.setattr(client, "_config", backend)
+    assert await Runner(config, client).run()
+    assert await Runner(config, client).run()
+
+
+async def test_source_loading_is_independent_of_branch_directory(make_branch_config: Callable[[str, int], RunConfig],
+                                                                 problem: Problem, client: OpenAIClient,
+                                                                 tmp_path: Path) -> None:
+    """Restore the explicit source even when destination storage has a different folder depth."""
+    config = make_branch_config("continue", 2)
+    refinement = SelfRefine(config, problem, 2, client)
+    refinement.storage.close()
+    refinement.storage = Storage(tmp_path / "branch")
+    await refinement.run()
+    assert refinement.state.output_tokens == config.compute_multiplier_k * OUTPUT_TOKENS_PER_BLOCK
+    assert (tmp_path / "branch" / CONVERSATION_FILENAME).is_file()

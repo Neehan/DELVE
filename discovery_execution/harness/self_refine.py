@@ -31,8 +31,10 @@ class SelfRefine:
             self.arm = f"oracle-at-{config.inject_sketch_at}x-execution"
         else:
             self.arm = f"{UNAIDED_EXPERIMENT}-{config.compute_multiplier_k}x"
-        directory = (model_output_directory(config.output_directory, config.competition, config.year, config.model)
-                     / self.arm / problem.problem_id)
+        model_directory = model_output_directory(config.output_directory, config.competition, config.year, config.model)
+        self.source_directory = (model_directory / config.source_arm / problem.problem_id / f"seed_{config.source_seed}"
+                                 if config.source_arm is not None else None)
+        directory = model_directory / self.arm / problem.problem_id
         directory = (directory / f"seed_{config.source_seed}" / f"branch_{seed}"
                      if config.experiment in CONTINUATION_EXPERIMENTS else directory / f"seed_{seed}")
         self.prompts = {
@@ -45,38 +47,42 @@ class SelfRefine:
     async def run(self) -> None:
         """Load progress, then prepare, generate, update, and save until the budget is exhausted."""
         with self.storage:
-            oracle = self.config.experiment in ORACLE_EXPERIMENTS
-            solution_index = self.config.solution_index
-            if solution_index is None:
-                sketch_seed = self.config.source_seed if self.config.source_seed is not None else self.seed
-                solution_index = sketch_seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
-                if (self.storage.directory / META_FILENAME).exists():
-                    solution_index = self.storage.read_metadata()["solution_index"]
-            if oracle:
-                if not 0 <= solution_index < len(self.problem.solutions):
-                    raise ValueError(f"missing solution index for {self.problem.problem_id}")
-                self.sketch = self.problem.solutions[solution_index].sketch
-            excluded = {"seeds", "batch_size", "output_directory"}
-            if self.config.continue_at is None:
-                excluded.update({"source_arm", "source_seed", "continue_at"})
-            metadata = {
-                **self.config.model_dump(mode="json", exclude=excluded),
-                "inject_sketch_at": self.injection_tokens // OUTPUT_TOKENS_PER_BLOCK if self.injection_tokens is not None else 0,
-                "solution_index": solution_index,
-                "problem_id": self.problem.problem_id, "seed": self.seed, "arm": self.arm,
-                # Slurm may restart the same model on a different host or port.
-                "backend": self.client.configuration.model_dump(exclude={"base_url"}),
-            }
-            self.state = self.storage.load(metadata)
-            if self.config.continue_at is not None and not self.state.output_tokens:
-                self.state = self.storage.load_source_prefix(metadata)
-                self.storage.save(self.state)
+            self._load_trajectory()
             while self.state.output_tokens < self.token_budget:
                 self._add_next_instruction()
                 request = self._build_request()
                 response = await self.client.generate(request)
                 self._record_response(request, response)
                 self.storage.save(self.state)
+
+    def _load_trajectory(self) -> None:
+        """Select the sketch, validate metadata, and restore saved progress or the source prefix."""
+        oracle = self.config.experiment in ORACLE_EXPERIMENTS
+        solution_index = self.config.solution_index
+        if solution_index is None:
+            sketch_seed = self.config.source_seed if self.config.source_seed is not None else self.seed
+            solution_index = sketch_seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
+            if (self.storage.directory / META_FILENAME).exists():
+                solution_index = self.storage.read_metadata()["solution_index"]
+        if oracle:
+            if not 0 <= solution_index < len(self.problem.solutions):
+                raise ValueError(f"missing solution index for {self.problem.problem_id}")
+            self.sketch = self.problem.solutions[solution_index].sketch
+        excluded = {"seeds", "batch_size", "output_directory"}
+        if self.config.continue_at is None:
+            excluded.update({"source_arm", "source_seed", "continue_at"})
+        metadata = {
+            **self.config.model_dump(mode="json", exclude=excluded),
+            "inject_sketch_at": self.injection_tokens // OUTPUT_TOKENS_PER_BLOCK if self.injection_tokens is not None else 0,
+            "solution_index": solution_index,
+            "problem_id": self.problem.problem_id, "seed": self.seed, "arm": self.arm,
+            # Slurm may restart the same model on a different host or port.
+            "backend": self.client.configuration.model_dump(exclude={"base_url"}),
+        }
+        self.state = self.storage.load(metadata)
+        if self.source_directory is not None and not self.state.output_tokens:
+            self.state = self.storage.load_source_prefix(self.source_directory, metadata)
+            self.storage.save(self.state)
 
     def _add_next_instruction(self) -> None:
         """Start solving, inject a due sketch, or advance after a natural response ending."""
