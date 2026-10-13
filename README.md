@@ -78,9 +78,9 @@ With vLLM 0.26.0 installed, start a server on two GPUs:
 uv run python -m discovery_execution.vllm.serve --model qwen3-4b-instruct-2507
 ```
 
-The server must report at least 81,920 context tokens, including inputs and generated output; unusually long inputs or many refinement turns may require more.
+The server must report at least 131,072 context tokens, including inputs and generated output; unusually long inputs or many refinement turns may require more.
 
-Serving uses an 81,920-token context and 92% GPU memory utilization. For long trajectories on 2× L40S, use:
+Serving uses a 131,072-token context and 92% GPU memory utilization. For long trajectories on 2× L40S, use:
 
 | Model | Parallelism | KV cache | Default batch (5×) | Measured long-context tokens/sec |
 | --- | --- | --- | ---: | ---: |

@@ -133,7 +133,7 @@ def test_injection_must_precede_budget(run_arguments: list[str], budget: int, in
                          "--compute-multiplier-k", str(budget), "--inject-sketch-at", str(injection)])
 
 
-@pytest.mark.parametrize("context_tokens", [MIN_CONTEXT_TOKENS - 1])
+@pytest.mark.parametrize("context_tokens", [81_920, MIN_CONTEXT_TOKENS - 1])
 async def test_small_context_fails_before_generation(make_run_config: Callable[[str, int], RunConfig],
                                                      client: OpenAIClient, records: list[dict[str, Any]]) -> None:
     """Reject an undersized server before creating any trajectory output."""
