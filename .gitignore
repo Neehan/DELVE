@@ -231,3 +231,6 @@ research_proposal.pdf
 
 # Local reviewed experiment report
 /results/
+
+# Local experiment controller
+/experiments/controller/

@@ -17,7 +17,7 @@ def test_serving_command(model: str) -> None:
     command = build_command(model, DEFAULT_PORT, None)
     assert command[:3] == ["vllm", "serve", SUPPORTED_MODELS[model]]
     assert command[command.index("--served-model-name") + 1] == model
-    assert command[command.index("--max-model-len") + 1] == "81920"
+    assert command[command.index("--max-model-len") + 1] == "131072"
     assert command[command.index("--kv-cache-dtype") + 1] == KV_CACHE_DTYPE[model]
     assert command[command.index(f"--{PARALLELISM[model]}-parallel-size") + 1] == "2"
     assert not {"--reasoning-parser", "--enable-auto-tool-choice", "--quantization"} & set(command)
