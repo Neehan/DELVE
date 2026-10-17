@@ -22,7 +22,7 @@ EXPERIMENTS = (UNAIDED_EXPERIMENT, ORACLE_EXECUTION_EXPERIMENT, *CONTINUATION_EX
 SOURCE_ARMS = tuple(f"unaided-{k}x" for k in range(1, MAX_BLOCKS + 1))
 NO_SOURCE = None
 SEED_MODULUS = 2**31
-COMPETITIONS = ("aime", "hmmt", "brumo", "smt", "bmt", "cmimc", "otis")
+COMPETITIONS = ("aime", "hmmt", "brumo", "smt", "bmt", "cmimc", "otis", "gunn")
 # CLI and vLLM served names mapped to their Hugging Face model repositories.
 SUPPORTED_MODELS = {
     "qwen3-4b-instruct-2507": "Qwen/Qwen3-4B-Instruct-2507",
