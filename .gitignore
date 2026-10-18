@@ -226,8 +226,8 @@ __marimo__/
 /logs/
 AGENTS.md
 
-# custom files
-research_proposal.pdf
+# Local research papers
+/related_work/
 
 # Local reviewed experiment report
 /results/
