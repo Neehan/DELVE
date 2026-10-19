@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi
 from transformers import AutoTokenizer
 
+from frozen_solver.cli.logging import disable_progress_bars
 from frozen_solver.constants import (
     DEFAULT_BRANCH_LIMIT, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_FRACTION, DEFAULT_REFERENCE_MODE, DEFAULT_SEED,
     PREPARED_DIRECTORY, TOKENIZED_DIRECTORY,
@@ -17,6 +18,7 @@ from frozen_solver.data.tokenizer import PrefixTokenizer
 def main() -> None:
     """Pin tokenizer/model revision and reject incompatible or silently truncated critic inputs."""
     load_dotenv()
+    disable_progress_bars()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=PREPARED_DIRECTORY)
     parser.add_argument("--destination", type=Path, default=TOKENIZED_DIRECTORY)
@@ -39,7 +41,7 @@ def main() -> None:
     settings = {"backbone": args.backbone, "revision": revision, "max_length": args.max_length,
                 "reference_mode": args.reference_mode, "oracle_fraction": args.oracle_fraction,
                 "branch_limit": args.branch_limit, "seed": args.seed}
-    PrefixTokenizer(tokenizer, settings).run(args.source, args.destination)
+    PrefixTokenizer(tokenizer).run(args.source, args.destination, settings)
 
 
 if __name__ == "__main__":

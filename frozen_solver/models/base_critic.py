@@ -1,17 +1,22 @@
-"""Shared LoRA backbone, prefix pooling, and count-weighted critic objective."""
+"""Shared critic construction, checkpoints, prefix pooling, and count-weighted objective."""
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Self
 
 import torch
+from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file, save_file
 from torch import Tensor, nn
 from torch.nn import functional as F
+from transformers import AutoModel
 
-from frozen_solver.constants import ORACLE, ORDINARY, SUCCESS, TRIALS
+from frozen_solver.constants import CONFIG_FILENAME, MODEL_FILENAME, ORACLE, ORDINARY, SUCCESS, TRIALS
 from frozen_solver.models.models import CriticConfig
 
 
 class BaseCritic(nn.Module, ABC):
-    """Forward pools the last visible token; subclasses implement predict and optional regularization."""
+    """Share construction and save/load; subclasses implement predict and optional regularization."""
 
     def __init__(self, backbone: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
         """Share backbone execution and configuration across all critic heads."""
@@ -20,6 +25,38 @@ class BaseCritic(nn.Module, ABC):
         self.hidden_size = hidden_size
         self.settings = settings
         self.horizons = settings.horizon - 1
+
+    @classmethod
+    def from_pretrained(cls, settings: CriticConfig, dtype: torch.dtype) -> Self:
+        """Build this critic with a pinned backbone and adapters on attention and MLP layers."""
+        backbone = AutoModel.from_pretrained(settings.backbone, revision=settings.revision,
+                                             dtype=dtype, attn_implementation=settings.attention)
+        backbone.config.use_cache = False
+        backbone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        adapter = LoraConfig(r=settings.lora_rank, lora_alpha=settings.lora_alpha, target_modules="all-linear")
+        adapted = get_peft_model(backbone, adapter)
+        return cls(adapted, backbone.config.hidden_size, settings)
+
+    def save(self, directory: Path) -> None:
+        """Save adapters, prediction heads, and configuration; Trainer owns optimizer/RNG state."""
+        directory.mkdir(parents=True, exist_ok=True)
+        weights = {name: parameter.detach().cpu().contiguous() for name, parameter in self.named_parameters()
+                   if parameter.requires_grad}
+        save_file(weights, str(directory / MODEL_FILENAME))
+        (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
+
+    def load_weights(self, directory: Path) -> None:
+        """Reject architecture or adapter mismatches before restoring trainable weights."""
+        settings = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
+        if settings != self.settings:
+            raise ValueError("critic checkpoint configuration differs")
+        weights = load_file(str(directory / MODEL_FILENAME))
+        parameters = {name: parameter for name, parameter in self.named_parameters() if parameter.requires_grad}
+        if parameters.keys() != weights.keys():
+            raise ValueError("critic checkpoint trainable parameter names differ")
+        with torch.no_grad():
+            for name, parameter in parameters.items():
+                parameter.copy_(weights[name])
 
     def forward(self, input_ids: Tensor, attention_mask: Tensor) -> dict[str, Tensor]:
         """Pool right-padded inputs without materializing vocabulary logits."""

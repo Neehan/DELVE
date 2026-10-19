@@ -22,8 +22,9 @@ class DECritic(BaseCritic):
 
     def predict(self, hidden: Tensor) -> dict[str, Tensor]:
         """Mix already-acquired execution with geometric acquisition, then correct its logits."""
-        discovered, alpha = self.acquisition(hidden).sigmoid().unbind(dim=-1)
-        execution_logits = self.execution(hidden)
+        # Keep probabilities in FP32: BF16 rounds the upper clamp bound to exactly one.
+        discovered, alpha = self.acquisition(hidden).float().sigmoid().unbind(dim=-1)
+        execution_logits = self.execution(hidden).float()
         epsilon = execution_logits.sigmoid()
         curve = []
         for horizon in range(self.horizons):
@@ -32,7 +33,7 @@ class DECritic(BaseCritic):
                 value = value + (1 - discovered) * alpha * (1 - alpha).pow(delay) * epsilon[:, horizon - delay]
             curve.append(value)
         prior = torch.stack(curve, dim=-1).clamp(PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
-        correction = self.correction(hidden)
+        correction = self.correction(hidden).float()
         ordinary_logits = torch.logit(prior) + correction
         return {"logits": torch.stack((ordinary_logits, execution_logits), dim=1),
                 "alpha": alpha, "discovered": discovered, "epsilon": epsilon, "correction": correction}

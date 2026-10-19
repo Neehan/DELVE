@@ -24,7 +24,7 @@ def selection_fraction(key: str, seed: int) -> float:
     return int.from_bytes(digest) / HASH_SCALE
 
 
-class DatasetPreparer:
+class DatasetProcessor:
     """Run validates exact prefixes and audits, then atomically publishes immutable splits."""
 
     def __init__(self, config: PreparationConfig) -> None:

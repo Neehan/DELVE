@@ -6,17 +6,19 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
 from datasets import Dataset, DatasetDict
 from transformers import PreTrainedTokenizerFast
 
 from frozen_solver.cli import evaluate, prepare, train
-from frozen_solver.constants import MANIFEST_FILENAME
+from frozen_solver.constants import MANIFEST_FILENAME, TRAINING_ARGS_FILENAME
 from frozen_solver.data.models import PreparationConfig
 from frozen_solver.models.models import CriticConfig
 
 
 def test_train_and_evaluate_cli(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                                training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: Any) -> None:
+                                training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: Any,
+                                capsys: pytest.CaptureFixture[str]) -> None:
     """Use the public CPU smoke-test path, select best on validation, and write terminal test metrics."""
     settings = critic_settings("auxiliary")
     cache, output, report = tmp_path / "cache", tmp_path / "training", tmp_path / "evaluation"
@@ -32,8 +34,16 @@ def test_train_and_evaluate_cli(critic_settings: Callable[[str], CriticConfig], 
     monkeypatch.setattr("sys.argv", ["train", "--data", str(cache), "--output", str(output), "--variant", "auxiliary",
                                      "--rank", "2", "--lora-alpha", "4", "--epochs", "1", "--accumulation-steps", "1", "--cpu"])
     train.main()
+    state = json.loads((output / "trainer_state.json").read_text())
+    loss_record = next(row for row in state["log_history"] if "loss" in row)
+    assert {"step", "epoch", "learning_rate", "grad_norm"} <= loss_record.keys()
+    assert any("eval_terminal_nll" in row and "eval_terminal_brier" in row for row in state["log_history"])
+    assert any("train_runtime" in row and "train_samples_per_second" in row for row in state["log_history"])
+    captured = capsys.readouterr()
+    assert '"learning_rate"' in captured.out and "it/s" not in captured.err
     checkpoint = output / "best"
     assert (checkpoint / "critic.safetensors").is_file()
+    assert json.loads((checkpoint / TRAINING_ARGS_FILENAME).read_text())["disable_tqdm"]
     monkeypatch.setattr("sys.argv", ["evaluate", "--data", str(cache), "--checkpoint", str(checkpoint),
                                      "--destination", str(report), "--split", "test", "--cpu"])
     evaluate.main()

@@ -9,10 +9,10 @@ import pytest
 import torch
 from transformers import PreTrainedTokenizerFast
 
-from frozen_solver.data.collator import PrefixCollator
+from frozen_solver.data.tokenizer import PrefixTokenizer
 from frozen_solver.eval.metrics import outcome_scores, terminal_scores
-from frozen_solver.models.checkpoint import build_critic, load_critic_weights, save_critic
 from frozen_solver.models.de_critic import DECritic
+from frozen_solver.models.direct_critic import DirectCritic
 from frozen_solver.models.models import CriticConfig
 
 
@@ -20,8 +20,9 @@ from frozen_solver.models.models import CriticConfig
 def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str], CriticConfig],
                                    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Only adapters and heads train; compact checkpoints reproduce predictions exactly."""
-    model = build_critic(critic_settings(variant), torch.float32)
-    batch = PrefixCollator(tokenizer)(training_rows)
+    critic_type = DECritic if variant == "de" else DirectCritic
+    model = critic_type.from_pretrained(critic_settings(variant), torch.float32)
+    batch = PrefixTokenizer(tokenizer).pad_batch(training_rows)
     counts = batch.pop("labels")
     model.train()
     prediction = model(**batch)
@@ -33,9 +34,9 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
     directory = tmp_path / "checkpoint"
     model.eval()
     expected = model(**batch)["logits"].detach()
-    save_critic(model, directory)
-    restored = build_critic(critic_settings(variant), torch.float32)
-    load_critic_weights(restored, directory)
+    model.save(directory)
+    restored = critic_type.from_pretrained(critic_settings(variant), torch.float32)
+    restored.load_weights(directory)
     restored.eval()
     torch.testing.assert_close(restored(**batch)["logits"], expected)
     assert (directory / "critic.safetensors").stat().st_size < (Path(model.settings.backbone) / "model.safetensors").stat().st_size
@@ -43,7 +44,7 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
 
 def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Aggregated labels use the same likelihood as their individual Bernoulli observations."""
-    model = build_critic(critic_settings("direct"), torch.float32)
+    model = DirectCritic.from_pretrained(critic_settings("direct"), torch.float32)
     logits = torch.tensor([[[0.7, -0.3], [1.0, 2.0]]], requires_grad=True)
     counts = torch.tensor([[[2, 3], [1, 2]], [[0, 0], [0, 0]]]).unsqueeze(0).float()
     loss = model.loss({"logits": logits}, counts)
@@ -57,7 +58,7 @@ def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticCo
 
 def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) -> None:
     """When the sketch is already acquired, DE reduces to the nonmonotonic execution curve."""
-    model = build_critic(critic_settings("de"), torch.float32)
+    model = DECritic.from_pretrained(critic_settings("de"), torch.float32)
     assert isinstance(model, DECritic)
     with torch.no_grad():
         model.acquisition.weight.zero_()
@@ -77,3 +78,22 @@ def test_metrics_score_outcomes_not_noisy_means() -> None:
     labels = np.array([[[[2, 2], [0, 2]], [[0, 0], [0, 0]]]])
     _, terminal = terminal_scores(np.array([[[0., 2.], [0., 0.]]]), labels)
     assert terminal[0] > 0.7
+
+
+@pytest.mark.parametrize("confidence", [-30.0, 30.0])
+def test_de_bfloat16_extremes_remain_finite(confidence: float, critic_settings: Callable[[str], CriticConfig]) -> None:
+    """BF16 saturation must not create infinite logits or NaN gradients in the DE prior."""
+    model = DECritic.from_pretrained(critic_settings("de"), torch.float32)
+    with torch.no_grad():
+        model.acquisition.weight.zero_()
+        model.acquisition.bias.fill_(confidence)
+        model.execution.weight.zero_()
+        model.execution.bias.fill_(confidence)
+    counts = torch.tensor([[[[1., 2.], [1., 2.]], [[1., 2.], [1., 2.]]]])
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        prediction = model.predict(torch.zeros(1, model.hidden_size))
+        loss = model.loss(prediction, counts)
+    assert torch.isfinite(prediction["logits"]).all()
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters() if parameter.grad is not None)

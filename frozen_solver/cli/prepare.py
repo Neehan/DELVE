@@ -8,9 +8,10 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi, snapshot_download
 
 from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, META_FILENAME, SUPPORTED_MODELS
+from frozen_solver.cli.logging import disable_progress_bars
 from frozen_solver.constants import CONDITIONS, DEFAULT_HORIZON, DEFAULT_SEED, DEFAULT_TEST_YEAR, DEFAULT_VALIDATION_FRACTION, PREPARED_DIRECTORY
 from frozen_solver.data.models import PreparationConfig
-from frozen_solver.data.preparer import DatasetPreparer
+from frozen_solver.data.processor import DatasetProcessor
 
 
 def download_outputs(repository: str, revision: str, solver: str, horizon: int) -> tuple[Path, str]:
@@ -40,6 +41,7 @@ def download_outputs(repository: str, revision: str, solver: str, horizon: int) 
 def main() -> None:
     """Resolve the requested source once; publish no data to Hugging Face implicitly."""
     load_dotenv()
+    disable_progress_bars()
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--outputs-directory", type=Path)
@@ -60,7 +62,7 @@ def main() -> None:
                                destination=args.destination, solver_model=args.solver_model, horizon=args.horizon,
                                test_year=args.test_year, validation_fraction=args.validation_fraction,
                                split_seed=args.seed, source_revision=f"{args.outputs_repo or 'local'}@{revision}")
-    DatasetPreparer(config).run()
+    DatasetProcessor(config).run()
 
 
 if __name__ == "__main__":

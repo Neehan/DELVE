@@ -11,15 +11,17 @@ from datasets import DatasetDict, load_from_disk
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, TrainingArguments, set_seed
 
+from frozen_solver.cli.logging import disable_progress_bars
 from frozen_solver.constants import (
     DEFAULT_ACCUMULATION_STEPS, DEFAULT_ATTENTION, DEFAULT_BATCH_SIZE, DEFAULT_CORRECTION_WEIGHT,
     DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
     DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
 )
-from frozen_solver.data.collator import PrefixCollator
+from frozen_solver.data.tokenizer import PrefixTokenizer
 from frozen_solver.eval.metrics import compute_metrics
-from frozen_solver.models.checkpoint import build_critic
+from frozen_solver.models.de_critic import DECritic
+from frozen_solver.models.direct_critic import DirectCritic
 from frozen_solver.models.models import CriticConfig
 from frozen_solver.trainer.critic_trainer import CriticTrainer
 
@@ -39,11 +41,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--accumulation-steps", type=int, default=DEFAULT_ACCUMULATION_STEPS)
+    parser.add_argument("--logging-steps", type=int, default=DEFAULT_LOGGING_STEPS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--cpu", action="store_true", help="float32 CPU smoke tests only")
     args = parser.parse_args()
-    if min(args.epochs, args.batch_size, args.accumulation_steps, args.learning_rate) <= 0:
+    if min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
         parser.error("training sizes and learning rate must be positive")
     return args
 
@@ -57,7 +60,8 @@ def training_arguments(args: argparse.Namespace) -> TrainingArguments:
                              warmup_steps=DEFAULT_WARMUP_RATIO, weight_decay=DEFAULT_WEIGHT_DECAY,
                              eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False,
-                             logging_steps=DEFAULT_LOGGING_STEPS, report_to="none", seed=args.seed,
+                             logging_strategy="steps", logging_steps=args.logging_steps, logging_first_step=True,
+                             disable_tqdm=True, report_to="none", seed=args.seed,
                              remove_unused_columns=False, label_names=["labels"],
                              train_sampling_strategy="group_by_length", ddp_find_unused_parameters=False)
 
@@ -68,6 +72,8 @@ def bind_training_run(args: argparse.Namespace, manifest: bytes, settings: Criti
     options["data"] = str(args.data)
     options["world_size"] = world_size
     record = {"options": options, "critic": settings.model_dump(), "cache_sha256": hashlib.sha256(manifest).hexdigest()}
+    cache = json.loads(manifest)
+    record["data"] = {"tokenization": cache["settings"], "preparation": cache["preparation"]["settings"]}
     path = args.output / "training.json"
     if args.resume is not None:
         if json.loads(path.read_text()) != record:
@@ -84,6 +90,7 @@ def bind_training_run(args: argparse.Namespace, manifest: bytes, settings: Criti
 def main() -> None:
     """Train on older problems, select using validation, and leave the test split untouched."""
     load_dotenv()
+    disable_progress_bars()
     args = parse_arguments()
     set_seed(args.seed)
     raw = (args.data / MANIFEST_FILENAME).read_bytes()
@@ -102,10 +109,11 @@ def main() -> None:
     if args.variant != "direct" and not any(sum(pair[1] for pair in row[1]) for row in dataset["train"]["labels"]):
         raise ValueError("no training prefix has oracle outcomes under this coverage selection")
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
-    model = build_critic(settings, torch.float32 if args.cpu else torch.bfloat16)
+    critic_type = DECritic if settings.variant == "de" else DirectCritic
+    model = critic_type.from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
     if cached["max_length"] > cast(Any, model.backbone).config.max_position_embeddings:
         raise ValueError("cached maximum length exceeds the critic backbone's context limit")
-    trainer = CriticTrainer(model=model, args=training_arguments(args), data_collator=PrefixCollator(tokenizer),
+    trainer = CriticTrainer(model=model, args=training_arguments(args), data_collator=PrefixTokenizer(tokenizer).pad_batch,
                             train_dataset=dataset["train"], eval_dataset=dataset["validation"], compute_metrics=compute_metrics)
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():

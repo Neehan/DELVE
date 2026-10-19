@@ -40,6 +40,7 @@ TRAINING_DIRECTORY = Path("output/frozen_solver")
 MODEL_FILENAME = "critic.safetensors"
 CONFIG_FILENAME = "critic.json"
 MANIFEST_FILENAME = "manifest.json"
+TRAINING_ARGS_FILENAME = "training_args.json"
 PROMPT = (
     "Estimate final-answer correctness after each additional block of self-refinement. "
     "One block contains {block_tokens} generated tokens. The solver follows solve, critique, "

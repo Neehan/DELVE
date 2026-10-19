@@ -1,14 +1,16 @@
 """Hugging Face Trainer integration; Accelerate owns distributed execution and optimizer state."""
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
 from torch import nn
 from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
+from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
+from frozen_solver.constants import TRAINING_ARGS_FILENAME
 from frozen_solver.models.base_critic import BaseCritic
-from frozen_solver.models.checkpoint import load_critic_weights, save_critic
 
 
 class CriticTrainer(Trainer):
@@ -20,6 +22,20 @@ class CriticTrainer(Trainer):
         if self.is_fsdp_enabled or self.is_deepspeed_enabled:
             raise ValueError("compact critic checkpoints support Trainer single-device/DDP only")
         self.model_accepts_loss_kwargs = False
+        self.args.disable_tqdm = True
+        self.remove_callback(PrinterCallback)
+        self.remove_callback(ProgressCallback)
+
+    def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
+        """Flush one metric record and atomically persist HF history on the primary process."""
+        super().log(logs, *args, **kwargs)
+        if self.is_world_process_zero():
+            print(json.dumps(self.state.log_history[-1]), flush=True)
+            directory = Path(cast(str, self.args.output_dir))
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f"{TRAINER_STATE_NAME}.tmp"
+            self.state.save_to_json(str(temporary))
+            temporary.replace(directory / TRAINER_STATE_NAME)
 
     def compute_loss(self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
         """Execute the wrapped model for DDP synchronization, then score its binomial predictions."""
@@ -36,7 +52,8 @@ class CriticTrainer(Trainer):
         """Store adapters and heads only; distributed sharded saves are deliberately unsupported here."""
         output_dir = args[0] if args else kwargs.get("output_dir", self.args.output_dir)
         directory = Path(output_dir)
-        save_critic(cast(BaseCritic, self.accelerator.unwrap_model(self.model)), directory)
+        cast(BaseCritic, self.accelerator.unwrap_model(self.model)).save(directory)
+        (directory / TRAINING_ARGS_FILENAME).write_text(self.args.to_json_string() + "\n")
 
     def _load_from_checkpoint(self, resume_from_checkpoint: str, *args: Any, **kwargs: Any) -> None:
         """Restore trainable weights; Trainer restores optimizer, scheduler, random state, and data position."""
@@ -45,10 +62,10 @@ class CriticTrainer(Trainer):
         for filename in (OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME, rng):
             if not (directory / filename).is_file():
                 raise FileNotFoundError(directory / filename)
-        load_critic_weights(cast(BaseCritic, self.model), directory)
+        cast(BaseCritic, self.model).load_weights(directory)
 
     def _load_best_model(self) -> None:
         """Load the model selected by held-out ordinary terminal NLL."""
         if self.state.best_model_checkpoint is None:
             raise ValueError("no best critic checkpoint was selected")
-        load_critic_weights(cast(BaseCritic, self.model), Path(self.state.best_model_checkpoint))
+        cast(BaseCritic, self.model).load_weights(Path(self.state.best_model_checkpoint))

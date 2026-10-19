@@ -33,6 +33,8 @@ uv run --extra frozen torchrun --standalone --nproc_per_node=2 -m frozen_solver.
 
 Defaults are rank 32, one prefix per GPU, gradient accumulation 8, SDPA attention, and backbone gradient checkpointing. `--attention flash_attention_2` requires a compatible FlashAttention installation. Trainer/Accelerate manage DDP, mixed precision, optimizer state, and resume; custom FSDP/DeepSpeed paths are not implemented. Resume with the same arguments plus `--resume output/frozen_solver/de/checkpoint-<step>`. Existing run directories are never silently reused. The longest-prefix GPU memory and throughput still need measurement on the target Slurm allocation.
 
+Slurm logs use plain text, without progress bars. Training prints step, epoch, loss, learning rate, and gradient norm at the first step and every 10 optimizer steps (`--logging-steps`). `trainer_state.json` saves metric history at every log and in each epoch checkpoint, including validation terminal NLL/Brier and final runtime/throughput. `training.json` records run/data settings; checkpoints also contain resolved `training_args.json`. Compare variants using held-out NLL/Brier, not their differently weighted total training losses.
+
 ```bash
 uv run --extra frozen python -m frozen_solver.cli.evaluate --checkpoint output/frozen_solver/de/best --split test --destination output/frozen_solver/de/test
 ```
