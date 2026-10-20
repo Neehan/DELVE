@@ -16,24 +16,31 @@ from critic_only.data.models import PreparationConfig
 from critic_only.models.models import CriticConfig
 
 
-def test_train_and_evaluate_cli(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+@pytest.mark.parametrize("variant", ["ordinary", "oracle-supervised", "de"])
+def test_train_and_evaluate_cli(variant: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                                 training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: Any,
                                 capsys: pytest.CaptureFixture[str]) -> None:
     """Use the public CPU smoke-test path, select best on validation, and write terminal test metrics."""
-    settings = critic_settings("oracle-supervised")
+    settings = critic_settings(variant)
+    trainer_factory = Mock(wraps=train.BaseTrainer)
+    monkeypatch.setattr(train, "BaseTrainer", trainer_factory)
     cache, output, report = tmp_path / "cache", tmp_path / "training", tmp_path / "evaluation"
     splits = {}
     for split in ("train", "validation", "test"):
+        rows = training_rows + [{**training_rows[0], "oracle": True}]
         splits[split] = Dataset.from_list([{**row, "prefix_id": f"{split}-{index}", "problem_key": f"{split}-{index}"}
-                                          for index, row in enumerate(training_rows)])
+                                          for index, row in enumerate(rows)])
     DatasetDict(splits).save_to_disk(str(cache))
     tokenizer.save_pretrained(cache / "tokenizer")
-    manifest = {"settings": {"backbone": settings.backbone, "revision": settings.revision, "reference_mode": "none",
+    manifest = {"settings": {"backbone": settings.backbone, "revision": settings.revision,
                              "oracle_supervision_fraction": 1, "max_length": 256}, "preparation": {"settings": {"horizon": 3}}}
     (cache / MANIFEST_FILENAME).write_text(json.dumps(manifest))
-    monkeypatch.setattr("sys.argv", ["train", "--data", str(cache), "--output", str(output), "--variant", "oracle-supervised",
+    monkeypatch.setattr("sys.argv", ["train", "--data", str(cache), "--output", str(output), "--variant", variant,
                                      "--rank", "2", "--lora-alpha", "4", "--epochs", "1", "--accumulation-steps", "1", "--cpu"])
     train.main()
+    assert list(trainer_factory.call_args.kwargs["train_dataset"]["oracle"]) == (
+        [False, False] if variant == "ordinary" else [False, False, True])
+    assert list(trainer_factory.call_args.kwargs["eval_dataset"]["oracle"]) == [False, False]
     state = json.loads((output / "trainer_state.json").read_text())
     loss_record = next(row for row in state["log_history"] if "loss" in row)
     assert {"step", "epoch", "learning_rate", "grad_norm"} <= loss_record.keys()
@@ -48,9 +55,13 @@ def test_train_and_evaluate_cli(critic_settings: Callable[[str], CriticConfig], 
                                      "--destination", str(report), "--split", "test", "--cpu"])
     evaluate.main()
     metrics = json.loads((report / "metrics.json").read_text())
-    assert metrics["problems"] == 2 and metrics["prefixes"] == 2
-    assert 0 <= metrics["terminal_brier"] <= 1
+    assert metrics["without_reference"]["problems"] == 2 and metrics["without_reference"]["prefixes"] == 2
+    assert metrics["with_reference"]["prefixes"] == 1
+    assert 0 <= metrics["without_reference"]["terminal_brier"] <= 1
     assert (report / "predictions.parquet").is_file()
+    predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
+    assert predictions[0]["privileged_probabilities"] is not None
+    assert predictions[1]["privileged_probabilities"] is None
 
 
 def test_hf_download_selects_only_needed_snapshots(prepared_inputs: PreparationConfig, monkeypatch: Any) -> None:
@@ -92,7 +103,7 @@ def test_setup_cli(prepared_inputs: PreparationConfig, tokenizer: PreTrainedToke
         setup.main()
         assert (destination / "prepared" / "test.parquet").is_file()
         cache = load_from_disk(str(destination / "tokenized"))
-        assert cache["test"][0]["labels"] == [[[2, 2], [1, 2]], [[2, 2], [1, 2]]]
+        assert cache["test"][0]["labels"] == [[2, 2], [1, 2]]
         manifest = json.loads((destination / "tokenized" / MANIFEST_FILENAME).read_text())
         assert manifest["settings"]["revision"] == "model-commit"
         with pytest.raises(FileExistsError):

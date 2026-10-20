@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,16 +16,15 @@ from transformers import AutoTokenizer, TrainingArguments, set_seed
 from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
-    DEFAULT_ACCUMULATION_STEPS, DEFAULT_ATTENTION, DEFAULT_BATCH_SIZE, DEFAULT_CORRECTION_WEIGHT,
+    DEFAULT_ACCUMULATION_STEPS, DEFAULT_ATTENTION, DEFAULT_BATCH_SIZE,
     DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
     DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
 )
+from critic_only.data.processor import select_ordinary_examples
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.eval.metrics import compute_metrics
-from critic_only.models.de_critic import DECritic
-from critic_only.models.ordinary import Ordinary
-from critic_only.models.oracle_supervised import OracleSupervised
+from critic_only.models.loader import create_critic_from_pretrained
 from critic_only.models.models import CriticConfig
 from critic_only.trainer.base_trainer import BaseTrainer
 
@@ -38,7 +38,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=DEFAULT_LORA_RANK)
     parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
-    parser.add_argument("--correction-weight", type=float, default=DEFAULT_CORRECTION_WEIGHT)
     parser.add_argument("--attention", choices=("sdpa", "flash_attention_2", "eager"), default=DEFAULT_ATTENTION)
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
@@ -97,32 +96,33 @@ def main() -> None:
     disable_progress_bar()
     args = parse_arguments()
     set_seed(args.seed)
-    raw = (args.data / MANIFEST_FILENAME).read_bytes()
-    manifest = json.loads(raw)
+    manifest_bytes = (args.data / MANIFEST_FILENAME).read_bytes()
+    manifest = json.loads(manifest_bytes)
     cached = manifest["settings"]
     settings = CriticConfig(backbone=cached["backbone"], revision=cached["revision"], variant=args.variant,
-                            reference_mode=cached["reference_mode"],
                             horizon=manifest["preparation"]["settings"]["horizon"], lora_rank=args.rank,
                             lora_alpha=args.lora_alpha, oracle_weight=args.oracle_weight,
-                            correction_weight=args.correction_weight, attention=args.attention)
+                            attention=args.attention)
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
     if args.variant != "ordinary" and cached["oracle_supervision_fraction"] == 0:
         raise ValueError("oracle-supervised variants require nonzero oracle coverage")
-    if args.variant != "ordinary" and not any(sum(pair[1] for pair in row[1]) for row in dataset["train"]["labels"]):
+    if args.variant != "ordinary" and not any(dataset["train"]["oracle"]):
         raise ValueError("no training prefix has oracle outcomes under this coverage selection")
+    if args.variant == "ordinary":
+        dataset["train"] = select_ordinary_examples(dataset["train"])
+    dataset["validation"] = select_ordinary_examples(dataset["validation"])
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
-    critic_type = (DECritic if settings.variant == "de" else
-                   OracleSupervised if settings.variant == "oracle-supervised" else Ordinary)
-    model = critic_type.create_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
+    model = create_critic_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
     if cached["max_length"] > cast(Any, model.backbone).config.max_position_embeddings:
         raise ValueError("cached maximum length exceeds the critic backbone's context limit")
     trainer = BaseTrainer(model=model, args=training_arguments(args), data_collator=PrefixTokenizer(tokenizer).pad_batch,
-                            train_dataset=dataset["train"], eval_dataset=dataset["validation"], compute_metrics=compute_metrics)
+                          train_dataset=dataset["train"], eval_dataset=dataset["validation"],
+                          compute_metrics=partial(compute_metrics, problem_keys=list(dataset["validation"]["problem_key"])))
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():
-            bind_training_run(args, raw, settings, trainer.args.world_size)
+            bind_training_run(args, manifest_bytes, settings, trainer.args.world_size)
     trainer.train(resume_from_checkpoint=str(args.resume) if args.resume else None)
     trainer.save_model(str(args.output / "best"))
     trainer.save_state()

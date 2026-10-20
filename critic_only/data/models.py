@@ -27,25 +27,18 @@ class BranchOutcome(BaseModel):
     """Retain seed-level outcomes, including later regressions, for resampling studies."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    condition: Literal["continue", "continue-oracle"]
     seed: int = Field(ge=0)
-    solution_index: int = Field(ge=0)
     outcomes: list[Literal[0, 1]]
     path: str
 
 
 class PrefixRecord(BaseModel):
-    """One exact ordinary prefix with independently generated ordinary and optional oracle labels."""
+    """One actual solver history and the outcomes of branches continuing that history."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     prefix_id: str
+    oracle: bool
     problem_key: str
-    competition: str
-    year: int
-    problem_id: str
-    solver_model: str
-    source_arm: str
-    source_seed: int
     fork: int
     remaining_blocks: int = Field(gt=0)
     split: Literal["train", "validation", "test"]
@@ -53,18 +46,17 @@ class PrefixRecord(BaseModel):
     phase: Literal["solve", "critique", "revise"]
     response_finished: bool
     solution_index: int = Field(ge=0)
-    reference_solution: str
-    oracle_sketch: str
+    reference_solution: str | None
     branches: list[BranchOutcome]
 
     @model_validator(mode="after")
     def validate_branches(self) -> "PrefixRecord":
         """Require unique independent branch identities and complete future outcome vectors."""
-        identities = [(item.condition, item.seed) for item in self.branches]
+        identities = [item.seed for item in self.branches]
         if len(identities) != len(set(identities)):
             raise ValueError(f"duplicate branch: {self.prefix_id}")
-        if not any(item.condition == "continue" for item in self.branches):
-            raise ValueError(f"prefix has no ordinary branches: {self.prefix_id}")
+        if not self.branches:
+            raise ValueError(f"history has no continuation branches: {self.prefix_id}")
         if any(len(item.outcomes) != self.remaining_blocks for item in self.branches):
             raise ValueError(f"incomplete future outcome vector: {self.prefix_id}")
         return self

@@ -4,12 +4,13 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import torch
 from torch import nn
 from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
-from critic_only.constants import TRAINING_ARGS_FILENAME
+from critic_only.constants import PAIRED_INPUT_WEIGHT, TRAINING_ARGS_FILENAME
 from critic_only.models.base_critic import BaseCritic
 
 
@@ -38,14 +39,37 @@ class BaseTrainer(Trainer):
             temporary.replace(directory / TRAINER_STATE_NAME)
 
     def compute_loss(self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        """Execute the wrapped model for DDP synchronization, then score its binomial predictions."""
+        """Combine reference-conditioned and ordinary input losses into one training objective.
+
+        The batch contains B input views without reference solutions followed by P privileged views that include a reference solution. labels contains counts for the B prefixes; privileged_indices maps the P extra views to those same labels. A single model forward processes all B+P views.
+
+        BaseCritic.loss returns one loss per prefix and input view. A prefix with a reference contributes (without_reference_loss + with_reference_loss)/2; a prefix without one contributes its full without-reference loss. The final scalar is the mean over B prefixes, so adding a reference does not double a prefix's weight. Predictions themselves are never averaged.
+
+        Each example has one history and one set of continuation labels. Oracle histories already include the sketch message; a privileged view appends the reference solution to that same history.
+
+        Returns:
+            The scalar loss, or (loss, outputs) when Trainer requests predictions. Outputs retain separate logits for both views, each shaped [B, horizons], plus a [B] privileged_available mask. Zero-filled privileged logits for missing references must be ignored using that mask.
+        """
         counts = inputs.pop("labels")
-        prediction = model(**inputs)
+        indices = inputs.pop("privileged_indices")
+        logits = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], oracle=inputs["oracle"])
+        unprivileged_logits = logits[:len(counts)]
+        oracle = inputs["oracle"][:len(counts)]
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
-        loss = critic.loss(prediction, counts)
+        losses = critic.loss(unprivileged_logits, counts, oracle)
+        privileged_logits = torch.zeros_like(unprivileged_logits)
+        available = torch.zeros(len(counts), dtype=torch.bool, device=counts.device)
+        if indices.numel():
+            privileged = logits[len(counts):]
+            privileged_losses = critic.loss(privileged, counts[indices], oracle[indices])
+            losses = losses.index_copy(0, indices, PAIRED_INPUT_WEIGHT * (losses[indices] + privileged_losses))
+            privileged_logits = privileged_logits.index_copy(0, indices, privileged)
+            available[indices] = True
+        loss = losses.mean()
         return_outputs = args[0] if args else kwargs.get("return_outputs", False)
         if return_outputs:
-            return loss, {"logits": prediction["logits"]}
+            return loss, {"logits": unprivileged_logits, "privileged_logits": privileged_logits,
+                          "privileged_available": available}
         return loss
 
     def _save(self, *args: Any, **kwargs: Any) -> None:
@@ -65,7 +89,7 @@ class BaseTrainer(Trainer):
         cast(BaseCritic, self.model).load_from_weights(directory)
 
     def _load_best_model(self) -> None:
-        """Load the model selected by held-out ordinary terminal NLL."""
+        """Load the model selected by held-out problem-macro terminal NLL without references."""
         if self.state.best_model_checkpoint is None:
             raise ValueError("no best critic checkpoint was selected")
         cast(BaseCritic, self.model).load_from_weights(Path(self.state.best_model_checkpoint))

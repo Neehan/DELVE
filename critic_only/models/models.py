@@ -13,11 +13,9 @@ class CriticConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     backbone: str
     revision: str
-    reference_mode: Literal["none", "solution"]
     variant: Literal["ordinary", "oracle-supervised", "de"]
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
     lora_rank: int = Field(gt=0)
     lora_alpha: int = Field(gt=0)
     oracle_weight: float = Field(ge=0)
-    correction_weight: float = Field(ge=0)
     attention: Literal["sdpa", "flash_attention_2", "eager"]

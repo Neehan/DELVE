@@ -4,4 +4,4 @@ from critic_only.models.ordinary import Ordinary
 
 
 class OracleSupervised(Ordinary):
-    """Reuse Ordinary's heads; the oracle-supervised configuration enables the oracle loss."""
+    """Train the same direct head on ordinary histories and histories containing the oracle sketch."""

@@ -45,8 +45,8 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
     def create(variant: str) -> CriticConfig:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(backbone=str(directory), revision="local", variant=variant, horizon=3,
-                                                reference_mode="none", lora_rank=2, lora_alpha=4,
-                                                oracle_weight=1, correction_weight=0.01, attention="eager"))
+                                                lora_rank=2, lora_alpha=4,
+                                                oracle_weight=1, attention="eager"))
 
     return create
 
@@ -96,8 +96,10 @@ def prepared_inputs(tmp_path: Path) -> PreparationConfig:
 
 @pytest.fixture
 def training_rows() -> list[dict[str, Any]]:
-    """Vary lengths and include missing oracle supervision in one row."""
-    return [{"input_ids": [2, 3, 2], "attention_mask": [1, 1, 1], "length": 3,
-             "labels": [[[1, 2], [0, 2]], [[2, 2], [1, 2]]]},
-            {"input_ids": [2, 3], "attention_mask": [1, 1], "length": 2,
-             "labels": [[[0, 2], [1, 2]], [[0, 0], [0, 0]]]}]
+    """Vary lengths and include missing oracle supervision and reference input in one row."""
+    return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
+             "privileged_input_ids": [2, 3, 2, 3, 3],
+             "oracle": False, "labels": [[1, 2], [0, 2]]},
+            {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
+             "privileged_input_ids": None,
+             "oracle": False, "labels": [[0, 2], [1, 2]]}]

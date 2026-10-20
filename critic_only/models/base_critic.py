@@ -11,12 +11,12 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, ORACLE, ORDINARY, SUCCESS, TRIALS
+from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, SUCCESS_COUNT_INDEX, TRIAL_COUNT_INDEX
 from critic_only.models.models import CriticConfig
 
 
 class BaseCritic(nn.Module, ABC):
-    """Share construction and save/load; subclasses implement predict and optional regularization."""
+    """Construct, restore, and score critics; subclasses implement predict."""
 
     def __init__(self, backbone: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
         """Share backbone execution and configuration across all critic heads."""
@@ -46,6 +46,9 @@ class BaseCritic(nn.Module, ABC):
         parameters = {name: parameter for name, parameter in self.named_parameters() if parameter.requires_grad}
         if parameters.keys() != weights.keys():
             raise ValueError("critic checkpoint trainable parameter names differ")
+        for name, parameter in parameters.items():
+            if weights[name].shape != parameter.shape:
+                raise ValueError(f"critic checkpoint shape differs for {name}: expected {parameter.shape}, got {weights[name].shape}")
         with torch.no_grad():
             for name, parameter in parameters.items():
                 parameter.copy_(weights[name])
@@ -58,28 +61,38 @@ class BaseCritic(nn.Module, ABC):
         save_file(weights, str(directory / MODEL_FILENAME))
         (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
 
-    def forward(self, input_ids: Tensor, attention_mask: Tensor) -> dict[str, Tensor]:
-        """Pool right-padded inputs without materializing vocabulary logits."""
+    def forward(self, input_ids: Tensor, attention_mask: Tensor, oracle: Tensor) -> Tensor:
+        """Pool each actual history at its last non-padding token, then predict future success."""
         output = self.backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         positions = attention_mask.sum(dim=-1) - 1
         hidden = output.last_hidden_state[torch.arange(input_ids.shape[0], device=input_ids.device), positions]
-        return self.predict(hidden.float())
+        return self.predict(hidden.float(), oracle)
 
     @abstractmethod
-    def predict(self, hidden: Tensor) -> dict[str, Tensor]:
-        """Return ordinary/oracle logits shaped [batch, condition, remaining horizon]."""
+    def predict(self, hidden: Tensor, oracle: Tensor) -> Tensor:
+        """Map history representations [views, hidden_size] to logits [views, horizons]; oracle marks sketch-injected histories."""
         raise NotImplementedError
 
-    def loss(self, prediction: dict[str, Tensor], counts: Tensor) -> Tensor:
-        """Average per-prefix binomial NLLs; absent oracle labels contribute exactly zero."""
-        logits = prediction["logits"].float()
-        successes, trials = counts[..., SUCCESS], counts[..., TRIALS]
-        nll = -successes * F.logsigmoid(logits) - (trials - successes) * F.logsigmoid(-logits)
-        ordinary = nll[:, ORDINARY].sum(dim=-1) / trials[:, ORDINARY].sum(dim=-1).clamp_min(1)
-        oracle = nll[:, ORACLE].sum(dim=-1) / trials[:, ORACLE].sum(dim=-1).clamp_min(1)
-        weight = self.settings.oracle_weight if self.settings.variant != "ordinary" else 0.0
-        return (ordinary + weight * oracle).mean() + self.regularization(prediction, trials[:, ORDINARY])
+    def loss(self, logits: Tensor, counts: Tensor, oracle: Tensor) -> Tensor:
+        """Compute one count-weighted prediction loss per actual solver history.
 
-    def regularization(self, prediction: dict[str, Tensor], trials: Tensor) -> Tensor:
-        """Default heads have no structural penalty; keep the result on the prediction device."""
-        return prediction["logits"].sum() * 0
+        Args:
+            logits: Predicted success logits [examples, horizons] for each actual history.
+            counts: Labels [examples, horizons, 2], with [successful branches, total branches] in the last axis. Horizon 0 means one additional block. Success grades the last answer at that checkpoint, not any earlier answer.
+            oracle: Boolean mask [examples] identifying histories with an injected sketch, used only for loss weighting.
+
+        For successes s, trials n, and probability p = sigmoid(logit), the negative log-likelihood is -s*log(p) - (n-s)*log(1-p). Thus [3, 8] represents three successes and five failures. The parameter-independent binomial coefficient is omitted.
+
+        Sum over future horizons and divide by total observed trials for this history. Counts [0, 0] mask horizons beyond its remaining budget. Repeated checkpoints from one branch are correlated: this is a sum of marginal prediction losses, not an independent joint trajectory likelihood.
+
+        Oracle examples receive oracle_weight; ordinary examples receive weight one. Ordinary-only training excludes oracle examples before batching.
+
+        Returns:
+            Losses [examples], without batch averaging. BaseTrainer averages the paired reference/no-reference losses for each example, then averages examples. References and generated oracle sketches are distinct inputs.
+        """
+        logits = logits.float()
+        successes, trials = counts[..., SUCCESS_COUNT_INDEX], counts[..., TRIAL_COUNT_INDEX]
+        nll = -successes * F.logsigmoid(logits) - (trials - successes) * F.logsigmoid(-logits)
+        normalized = nll.sum(dim=-1) / trials.sum(dim=-1).clamp_min(1)
+        weight = torch.where(oracle, self.settings.oracle_weight, 1.0)
+        return weight * normalized

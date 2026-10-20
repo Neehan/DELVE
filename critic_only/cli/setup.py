@@ -14,7 +14,7 @@ from transformers.utils.logging import disable_progress_bar
 from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, META_FILENAME, SUPPORTED_MODELS
 from critic_only.constants import (
     CONDITIONS, DEFAULT_BRANCH_LIMIT, DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
-    DEFAULT_REFERENCE_MODE, DEFAULT_SEED, DEFAULT_TEST_YEAR, DEFAULT_VALIDATION_FRACTION,
+    DEFAULT_SEED, DEFAULT_TEST_YEAR, DEFAULT_VALIDATION_FRACTION,
     PREPARED_SUBDIRECTORY, PROCESSING_DIRECTORY, TOKENIZED_SUBDIRECTORY,
 )
 from critic_only.data.models import PreparationConfig
@@ -63,7 +63,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--backbone", required=True)
     parser.add_argument("--backbone-revision", required=True)
     parser.add_argument("--max-length", type=int, default=DEFAULT_MAX_LENGTH)
-    parser.add_argument("--reference-mode", choices=("none", "solution"), default=DEFAULT_REFERENCE_MODE)
     parser.add_argument("--oracle-supervision-fraction", type=float, default=DEFAULT_ORACLE_SUPERVISION_FRACTION)
     parser.add_argument("--branch-limit", type=int, default=DEFAULT_BRANCH_LIMIT, help="training branches per prefix and condition")
     args = parser.parse_args()
@@ -87,7 +86,7 @@ def main() -> None:
         raise ValueError("HF backbone revision could not be resolved")
     tokenizer = PrefixTokenizer(AutoTokenizer.from_pretrained(args.backbone, revision=revision, padding_side="right"))
     settings = {"backbone": args.backbone, "revision": revision, "max_length": args.max_length,
-                "reference_mode": args.reference_mode, "oracle_supervision_fraction": args.oracle_supervision_fraction,
+                "oracle_supervision_fraction": args.oracle_supervision_fraction,
                 "branch_limit": args.branch_limit, "seed": args.seed}
     directory, revision = args.outputs_directory, args.revision
     print("Processing saved trajectories and audits.", flush=True)
