@@ -6,7 +6,7 @@ import numpy as np
 from scipy.special import expit
 from transformers import EvalPrediction
 
-from frozen_solver.constants import ORDINARY, PROBABILITY_EPSILON, SUCCESS, TRIALS
+from critic_only.constants import ORDINARY, PROBABILITY_EPSILON, SUCCESS, TRIALS
 
 
 def outcome_scores(probability: np.ndarray, counts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

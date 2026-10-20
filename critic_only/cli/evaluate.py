@@ -8,22 +8,26 @@ from typing import Any, cast
 import numpy as np
 import torch
 from datasets import Dataset, DatasetDict, load_from_disk
+from datasets.utils import disable_progress_bars
 from scipy.special import expit
 from transformers import AutoTokenizer, TrainingArguments
 
-from frozen_solver.cli.logging import disable_progress_bars
-from frozen_solver.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE, MANIFEST_FILENAME, SPLITS, TOKENIZED_DIRECTORY
-from frozen_solver.data.tokenizer import PrefixTokenizer
-from frozen_solver.eval.metrics import evaluation_report
-from frozen_solver.models.de_critic import DECritic
-from frozen_solver.models.direct_critic import DirectCritic
-from frozen_solver.models.models import CriticConfig
-from frozen_solver.trainer.critic_trainer import CriticTrainer
+from transformers.utils.logging import disable_progress_bar
+
+from critic_only.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE, MANIFEST_FILENAME, SPLITS, TOKENIZED_DIRECTORY
+from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.eval.metrics import evaluation_report
+from critic_only.models.de_critic import DECritic
+from critic_only.models.ordinary import Ordinary
+from critic_only.models.oracle_supervised import OracleSupervised
+from critic_only.models.models import CriticConfig
+from critic_only.trainer.base_trainer import BaseTrainer
 
 
 def main() -> None:
     """Write predictions and proper scoring rules; evaluation never uses reference labels as input."""
     disable_progress_bars()
+    disable_progress_bar()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=TOKENIZED_DIRECTORY)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -42,14 +46,15 @@ def main() -> None:
             or cache["preparation"]["settings"]["horizon"] != settings.horizon):
         raise ValueError("evaluation prompt or horizon differs from training")
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))[args.split]
-    critic_type = DECritic if settings.variant == "de" else DirectCritic
-    model = critic_type.from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
-    model.load_weights(args.checkpoint)
+    critic_type = (DECritic if settings.variant == "de" else
+                   OracleSupervised if settings.variant == "oracle-supervised" else Ordinary)
+    model = critic_type.create_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
+    model.load_from_weights(args.checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
     training = TrainingArguments(output_dir=str(args.destination), use_cpu=args.cpu, bf16=not args.cpu,
                                  per_device_eval_batch_size=args.batch_size, remove_unused_columns=False,
                                  label_names=["labels"], report_to="none", disable_tqdm=True)
-    trainer = CriticTrainer(model=model, args=training, data_collator=PrefixTokenizer(tokenizer).pad_batch)
+    trainer = BaseTrainer(model=model, args=training, data_collator=PrefixTokenizer(tokenizer).pad_batch)
     result = trainer.predict(cast(Any, dataset))
     logits, labels = np.asarray(result.predictions), np.asarray(result.label_ids)
     if trainer.is_world_process_zero():

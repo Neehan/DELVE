@@ -12,9 +12,9 @@ from torch import Tensor
 from transformers import PreTrainedTokenizerBase
 
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
-from frozen_solver.constants import CONDITIONS, MANIFEST_FILENAME, PROMPT, REFERENCE_PROMPT, SPLITS
-from frozen_solver.data.models import PrefixRecord
-from frozen_solver.data.processor import selection_fraction
+from critic_only.constants import CONDITIONS, MANIFEST_FILENAME, PROMPT, REFERENCE_PROMPT, SPLITS
+from critic_only.data.models import PrefixRecord
+from critic_only.data.processor import selection_fraction
 
 
 class PrefixTokenizer:
@@ -37,8 +37,8 @@ class PrefixTokenizer:
         """Build one ordinary input; oracle outcomes supervise a separate output, never enter the input."""
         record = PrefixRecord.model_validate(dict(row))
         conversation = "\n\n".join(f"{item['role']}:\n{item['content']}" for item in record.messages)
-        text = PROMPT.format(block_tokens=OUTPUT_TOKENS_PER_BLOCK, fork=record.fork,
-                             budget=record.horizon, conversation=conversation, phase=record.phase,
+        text = PROMPT.format(block_tokens=OUTPUT_TOKENS_PER_BLOCK, remaining_blocks=record.remaining_blocks,
+                             conversation=conversation, phase=record.phase,
                              response_finished=record.response_finished)
         if settings["reference_mode"] == "solution":
             text += REFERENCE_PROMPT.format(solution=record.reference_solution)
@@ -46,7 +46,7 @@ class PrefixTokenizer:
         if len(token_ids) > settings["max_length"]:
             raise ValueError(f"prefix exceeds max-length; truncation is forbidden: {record.prefix_id}")
         counts = []
-        oracle_available = selection_fraction(f"oracle:{record.problem_key}", settings["seed"]) < settings["oracle_fraction"]
+        oracle_available = selection_fraction(f"oracle:{record.problem_key}", settings["seed"]) < settings["oracle_supervision_fraction"]
         for condition in CONDITIONS:
             branches = [item for item in record.branches if item.condition == condition]
             if record.split == "train" and settings["branch_limit"] is not None:
@@ -55,11 +55,11 @@ class PrefixTokenizer:
             if condition == "continue-oracle" and record.split == "train" and not oracle_available:
                 branches = []
             counts.append([[sum(item.outcomes[h] for item in branches), len(branches)]
-                           if h < record.horizon - record.fork else [0, 0]
-                           for h in range(record.horizon - 1)])
+                           if h < record.remaining_blocks else [0, 0]
+                           for h in range(record.fork + record.remaining_blocks - 1)])
         return {"input_ids": token_ids, "attention_mask": [1] * len(token_ids), "labels": counts,
                 "length": len(token_ids), "prefix_id": record.prefix_id, "problem_key": record.problem_key,
-                "fork": record.fork, "horizon": record.horizon}
+                "fork": record.fork, "remaining_blocks": record.remaining_blocks}
 
     def run(self, source: Path, destination: Path, settings: dict[str, Any]) -> None:
         """Publish a memory-mappable Arrow cache with its exact input and tokenizer provenance."""

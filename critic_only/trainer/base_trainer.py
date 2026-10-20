@@ -9,11 +9,11 @@ from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
-from frozen_solver.constants import TRAINING_ARGS_FILENAME
-from frozen_solver.models.base_critic import BaseCritic
+from critic_only.constants import TRAINING_ARGS_FILENAME
+from critic_only.models.base_critic import BaseCritic
 
 
-class CriticTrainer(Trainer):
+class BaseTrainer(Trainer):
     """Override only the count loss and compact model serialization; retain HF training/resume machinery."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -62,10 +62,10 @@ class CriticTrainer(Trainer):
         for filename in (OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME, rng):
             if not (directory / filename).is_file():
                 raise FileNotFoundError(directory / filename)
-        cast(BaseCritic, self.model).load_weights(directory)
+        cast(BaseCritic, self.model).load_from_weights(directory)
 
     def _load_best_model(self) -> None:
         """Load the model selected by held-out ordinary terminal NLL."""
         if self.state.best_model_checkpoint is None:
             raise ValueError("no best critic checkpoint was selected")
-        cast(BaseCritic, self.model).load_weights(Path(self.state.best_model_checkpoint))
+        cast(BaseCritic, self.model).load_from_weights(Path(self.state.best_model_checkpoint))

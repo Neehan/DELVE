@@ -9,19 +9,20 @@ import pytest
 import torch
 from transformers import PreTrainedTokenizerFast
 
-from frozen_solver.data.tokenizer import PrefixTokenizer
-from frozen_solver.eval.metrics import outcome_scores, terminal_scores
-from frozen_solver.models.de_critic import DECritic
-from frozen_solver.models.direct_critic import DirectCritic
-from frozen_solver.models.models import CriticConfig
+from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.eval.metrics import outcome_scores, terminal_scores
+from critic_only.models.de_critic import DECritic
+from critic_only.models.ordinary import Ordinary
+from critic_only.models.oracle_supervised import OracleSupervised
+from critic_only.models.models import CriticConfig
 
 
-@pytest.mark.parametrize("variant", ["direct", "auxiliary", "de"])
+@pytest.mark.parametrize("variant", ["ordinary", "oracle-supervised", "de"])
 def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str], CriticConfig],
                                    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Only adapters and heads train; compact checkpoints reproduce predictions exactly."""
-    critic_type = DECritic if variant == "de" else DirectCritic
-    model = critic_type.from_pretrained(critic_settings(variant), torch.float32)
+    critic_type = DECritic if variant == "de" else OracleSupervised if variant == "oracle-supervised" else Ordinary
+    model = critic_type.create_from_pretrained(critic_settings(variant), torch.float32)
     batch = PrefixTokenizer(tokenizer).pad_batch(training_rows)
     counts = batch.pop("labels")
     model.train()
@@ -35,8 +36,8 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
     model.eval()
     expected = model(**batch)["logits"].detach()
     model.save(directory)
-    restored = critic_type.from_pretrained(critic_settings(variant), torch.float32)
-    restored.load_weights(directory)
+    restored = critic_type.create_from_pretrained(critic_settings(variant), torch.float32)
+    restored.load_from_weights(directory)
     restored.eval()
     torch.testing.assert_close(restored(**batch)["logits"], expected)
     assert (directory / "critic.safetensors").stat().st_size < (Path(model.settings.backbone) / "model.safetensors").stat().st_size
@@ -44,7 +45,7 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
 
 def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Aggregated labels use the same likelihood as their individual Bernoulli observations."""
-    model = DirectCritic.from_pretrained(critic_settings("direct"), torch.float32)
+    model = Ordinary.create_from_pretrained(critic_settings("ordinary"), torch.float32)
     logits = torch.tensor([[[0.7, -0.3], [1.0, 2.0]]], requires_grad=True)
     counts = torch.tensor([[[2, 3], [1, 2]], [[0, 0], [0, 0]]]).unsqueeze(0).float()
     loss = model.loss({"logits": logits}, counts)
@@ -58,7 +59,7 @@ def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticCo
 
 def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) -> None:
     """When the sketch is already acquired, DE reduces to the nonmonotonic execution curve."""
-    model = DECritic.from_pretrained(critic_settings("de"), torch.float32)
+    model = DECritic.create_from_pretrained(critic_settings("de"), torch.float32)
     assert isinstance(model, DECritic)
     with torch.no_grad():
         model.acquisition.weight.zero_()
@@ -83,7 +84,7 @@ def test_metrics_score_outcomes_not_noisy_means() -> None:
 @pytest.mark.parametrize("confidence", [-30.0, 30.0])
 def test_de_bfloat16_extremes_remain_finite(confidence: float, critic_settings: Callable[[str], CriticConfig]) -> None:
     """BF16 saturation must not create infinite logits or NaN gradients in the DE prior."""
-    model = DECritic.from_pretrained(critic_settings("de"), torch.float32)
+    model = DECritic.create_from_pretrained(critic_settings("de"), torch.float32)
     with torch.no_grad():
         model.acquisition.weight.zero_()
         model.acquisition.bias.fill_(confidence)

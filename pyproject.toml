@@ -39,7 +39,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.pyright]
-include = ["discovery_execution", "frozen_solver"]
+include = ["discovery_execution", "critic_only"]
 typeCheckingMode = "standard"
 pythonVersion = "3.12"
 venvPath = "."

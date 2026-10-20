@@ -8,22 +8,25 @@ from typing import Any, cast
 
 import torch
 from datasets import DatasetDict, load_from_disk
+from datasets.utils import disable_progress_bars
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, TrainingArguments, set_seed
 
-from frozen_solver.cli.logging import disable_progress_bars
-from frozen_solver.constants import (
+from transformers.utils.logging import disable_progress_bar
+
+from critic_only.constants import (
     DEFAULT_ACCUMULATION_STEPS, DEFAULT_ATTENTION, DEFAULT_BATCH_SIZE, DEFAULT_CORRECTION_WEIGHT,
     DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
     DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
 )
-from frozen_solver.data.tokenizer import PrefixTokenizer
-from frozen_solver.eval.metrics import compute_metrics
-from frozen_solver.models.de_critic import DECritic
-from frozen_solver.models.direct_critic import DirectCritic
-from frozen_solver.models.models import CriticConfig
-from frozen_solver.trainer.critic_trainer import CriticTrainer
+from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.eval.metrics import compute_metrics
+from critic_only.models.de_critic import DECritic
+from critic_only.models.ordinary import Ordinary
+from critic_only.models.oracle_supervised import OracleSupervised
+from critic_only.models.models import CriticConfig
+from critic_only.trainer.base_trainer import BaseTrainer
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -91,6 +94,7 @@ def main() -> None:
     """Train on older problems, select using validation, and leave the test split untouched."""
     load_dotenv()
     disable_progress_bars()
+    disable_progress_bar()
     args = parse_arguments()
     set_seed(args.seed)
     raw = (args.data / MANIFEST_FILENAME).read_bytes()
@@ -104,16 +108,17 @@ def main() -> None:
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
-    if args.variant != "direct" and cached["oracle_fraction"] == 0:
+    if args.variant != "ordinary" and cached["oracle_supervision_fraction"] == 0:
         raise ValueError("oracle-supervised variants require nonzero oracle coverage")
-    if args.variant != "direct" and not any(sum(pair[1] for pair in row[1]) for row in dataset["train"]["labels"]):
+    if args.variant != "ordinary" and not any(sum(pair[1] for pair in row[1]) for row in dataset["train"]["labels"]):
         raise ValueError("no training prefix has oracle outcomes under this coverage selection")
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
-    critic_type = DECritic if settings.variant == "de" else DirectCritic
-    model = critic_type.from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
+    critic_type = (DECritic if settings.variant == "de" else
+                   OracleSupervised if settings.variant == "oracle-supervised" else Ordinary)
+    model = critic_type.create_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
     if cached["max_length"] > cast(Any, model.backbone).config.max_position_embeddings:
         raise ValueError("cached maximum length exceeds the critic backbone's context limit")
-    trainer = CriticTrainer(model=model, args=training_arguments(args), data_collator=PrefixTokenizer(tokenizer).pad_batch,
+    trainer = BaseTrainer(model=model, args=training_arguments(args), data_collator=PrefixTokenizer(tokenizer).pad_batch,
                             train_dataset=dataset["train"], eval_dataset=dataset["validation"], compute_metrics=compute_metrics)
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():

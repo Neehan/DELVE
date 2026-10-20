@@ -14,8 +14,8 @@ from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK,
 )
 from discovery_execution.harness.models import Problem, RunState
-from frozen_solver.constants import CONDITIONS, HASH_SCALE, MANIFEST_FILENAME, SPLITS
-from frozen_solver.data.models import BranchOutcome, PrefixRecord, PreparationConfig
+from critic_only.constants import CONDITIONS, HASH_SCALE, MANIFEST_FILENAME, SPLITS
+from critic_only.data.models import BranchOutcome, PrefixRecord, PreparationConfig
 
 
 def selection_fraction(key: str, seed: int) -> float:
@@ -96,7 +96,7 @@ class DatasetProcessor:
         oracle_indices = {item.solution_index for item in branches if item.condition == "continue-oracle"}
         if len(oracle_indices) > 1:
             raise ValueError("oracle branches from one prefix must use the same sketch")
-        solution_index = next(iter(oracle_indices), 0)
+        solution_index = problem.select_solution_index(metadata["source_seed"], next(iter(oracle_indices), None))
         solution = problem.solutions[solution_index]
         for path, item in group:
             if item["experiment"] == "continue-oracle":
@@ -109,10 +109,10 @@ class DatasetProcessor:
                             problem_key=key, competition=problem.competition, year=problem.year,
                             problem_id=problem.problem_id, solver_model=metadata["model"],
                             source_arm=metadata["source_arm"], source_seed=metadata["source_seed"],
-                            fork=fork, horizon=self.config.horizon, split=self._split(key, problem.year),
+                            fork=fork, remaining_blocks=self.config.horizon - fork, split=self._split(key, problem.year),
                             messages=snapshot["messages"], phase=request["phase"],
-                            response_finished=request["finish_reason"] == "stop", reference_solution=solution.solution,
-                            oracle_sketch=solution.sketch if oracle_indices else None, branches=branches)
+                            response_finished=request["finish_reason"] == "stop", solution_index=solution_index,
+                            reference_solution=solution.solution, oracle_sketch=solution.sketch, branches=branches)
 
     def _source_state(self, source: Path, fork: int) -> tuple[dict[str, Any], dict[str, Any]]:
         """Recover the phase and natural-ending flag at the fork, never from the parent's final state."""

@@ -3,9 +3,9 @@
 import torch
 from torch import Tensor, nn
 
-from frozen_solver.constants import DE_STATE_FIELDS, PROBABILITY_EPSILON
-from frozen_solver.models.base_critic import BaseCritic
-from frozen_solver.models.models import CriticConfig
+from critic_only.constants import DE_STATE_FIELDS, PROBABILITY_EPSILON
+from critic_only.models.base_critic import BaseCritic
+from critic_only.models.models import CriticConfig
 
 
 class DECritic(BaseCritic):

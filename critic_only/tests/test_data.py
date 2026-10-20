@@ -8,10 +8,10 @@ import zstandard
 from datasets import Dataset, load_from_disk
 from transformers import PreTrainedTokenizerFast
 
-from frozen_solver.constants import MANIFEST_FILENAME
-from frozen_solver.data.models import PreparationConfig
-from frozen_solver.data.processor import DatasetProcessor, selection_fraction
-from frozen_solver.data.tokenizer import PrefixTokenizer
+from critic_only.constants import MANIFEST_FILENAME
+from critic_only.data.models import PreparationConfig
+from critic_only.data.processor import DatasetProcessor, selection_fraction
+from critic_only.data.tokenizer import PrefixTokenizer
 
 
 def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: PreTrainedTokenizerFast, tmp_path: Path) -> None:
@@ -22,10 +22,12 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     assert row["branches"][0]["outcomes"] == [1, 0]
     assert row["messages"][-1]["content"] == "Thinking"
     assert len(row["branches"]) == 4
+    assert row["remaining_blocks"] == 2 and "horizon" not in row
     settings = {"backbone": "tiny", "revision": "local", "max_length": 256, "reference_mode": "none",
-                "oracle_fraction": 0, "branch_limit": None, "seed": 42}
+                "oracle_supervision_fraction": 0, "branch_limit": None, "seed": 42}
     processor = PrefixTokenizer(tokenizer)
     encoded = processor.encode(row, settings)
+    assert encoded["remaining_blocks"] == 2 and "horizon" not in encoded
     assert encoded["labels"] == [[[2, 2], [1, 2]], [[2, 2], [1, 2]]]
     row["split"] = "train"
     assert processor.encode(row, settings)["labels"][1] == [[0, 0], [0, 0]]
@@ -80,7 +82,7 @@ def test_no_truncation(prepared_inputs: PreparationConfig, tokenizer: PreTrained
     DatasetProcessor(prepared_inputs).run()
     row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
     processor = PrefixTokenizer(tokenizer)
-    settings = {"max_length": 1, "reference_mode": "none", "oracle_fraction": 1,
+    settings = {"max_length": 1, "reference_mode": "none", "oracle_supervision_fraction": 1,
                 "branch_limit": None, "seed": 42}
     with pytest.raises(ValueError, match="truncation"):
         processor.encode(row, settings)
@@ -92,7 +94,7 @@ def test_training_branch_limit_and_independent_coverage(prepared_inputs: Prepara
     DatasetProcessor(prepared_inputs).run()
     row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
     processor = PrefixTokenizer(tokenizer)
-    settings = {"max_length": 256, "reference_mode": "none", "oracle_fraction": 0.25,
+    settings = {"max_length": 256, "reference_mode": "none", "oracle_supervision_fraction": 0.25,
                 "branch_limit": 1, "seed": 42}
     assert processor.encode(row, settings)["labels"][0][0][1] == 2
     row["split"] = "train"
@@ -102,3 +104,39 @@ def test_training_branch_limit_and_independent_coverage(prepared_inputs: Prepara
     row["problem_key"] = key
     encoded = processor.encode(row, settings)
     assert encoded["labels"][0][0][1] == 1 and encoded["labels"][1][0][1] == 1
+
+
+@pytest.mark.parametrize("oracle_index", [None, 0, 1])
+@pytest.mark.parametrize("source_seed", [0, 1, 3, 4])
+def test_reference_pair_follows_collection(prepared_inputs: PreparationConfig, oracle_index: int | None,
+                                          source_seed: int) -> None:
+    """Keep a saved oracle selection, or use source-seed round robin when oracle branches are absent."""
+    for path in prepared_inputs.datasets_directory.rglob("*.jsonl"):
+        problem = json.loads(path.read_text())
+        problem["solutions"].append({"source": "ai_generated", "solution": "Alternate proof.",
+                                     "sketch": "Count the complement."})
+        path.write_text(json.dumps(problem) + "\n")
+    for path in prepared_inputs.outputs_directory.rglob("meta.json"):
+        metadata = json.loads(path.read_text())
+        if metadata["experiment"] == "unaided":
+            metadata["seed"] = source_seed
+        else:
+            metadata["source_seed"] = source_seed
+        if metadata["experiment"] == "continue-oracle" and oracle_index is not None:
+            metadata["solution_index"] = oracle_index
+            snapshot_path = path.parent / "checkpoint_2x.json.zst"
+            snapshot = json.loads(zstandard.decompress(snapshot_path.read_bytes()))
+            snapshot["messages"][-1]["content"] = "Count the complement." if oracle_index else "Use symmetry."
+            snapshot_path.write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+        path.write_text(json.dumps(metadata))
+    for directory in list(prepared_inputs.outputs_directory.rglob("seed_0")):
+        directory.rename(directory.with_name(f"seed_{source_seed}"))
+    if oracle_index is None:
+        for directory in list(prepared_inputs.outputs_directory.rglob("continue-oracle-at-1x")):
+            directory.rename(prepared_inputs.destination.parent / f"withheld-oracle-{directory.parent.parent.name}")
+    DatasetProcessor(prepared_inputs).run()
+    row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
+    selected = source_seed % 2 if oracle_index is None else oracle_index
+    assert row["solution_index"] == selected
+    assert row["reference_solution"] == ("Alternate proof." if selected else "The answer is one.")
+    assert row["oracle_sketch"] == ("Count the complement." if selected else "Use symmetry.")

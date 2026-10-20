@@ -10,11 +10,11 @@ import torch
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast, TrainerCallback, TrainingArguments, set_seed
 
-from frozen_solver.data.tokenizer import PrefixTokenizer
-from frozen_solver.eval.metrics import compute_metrics
-from frozen_solver.models.de_critic import DECritic
-from frozen_solver.models.models import CriticConfig
-from frozen_solver.trainer.critic_trainer import CriticTrainer
+from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.eval.metrics import compute_metrics
+from critic_only.models.de_critic import DECritic
+from critic_only.models.models import CriticConfig
+from critic_only.trainer.base_trainer import BaseTrainer
 
 
 class InterruptTraining(TrainerCallback):
@@ -29,10 +29,10 @@ class InterruptTraining(TrainerCallback):
 
 
 def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedTokenizerFast,
-                 rows: list[dict[str, Any]], callbacks: list[TrainerCallback]) -> CriticTrainer:
+                 rows: list[dict[str, Any]], callbacks: list[TrainerCallback]) -> BaseTrainer:
     """Use real Trainer accumulation, evaluation, and checkpoint selection on a tiny CPU model."""
     set_seed(17)
-    model = DECritic.from_pretrained(settings, torch.float32)
+    model = DECritic.create_from_pretrained(settings, torch.float32)
     data = Dataset.from_list(rows)
     args = TrainingArguments(output_dir=str(directory), max_steps=4, per_device_train_batch_size=1,
                              per_device_eval_batch_size=1, gradient_accumulation_steps=2, learning_rate=1e-3,
@@ -41,7 +41,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                              logging_steps=1, disable_tqdm=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False, seed=17,
                              remove_unused_columns=False, label_names=["labels"], report_to="none")
-    return CriticTrainer(model=model, args=args, data_collator=PrefixTokenizer(tokenizer).pad_batch, train_dataset=data,
+    return BaseTrainer(model=model, args=args, data_collator=PrefixTokenizer(tokenizer).pad_batch, train_dataset=data,
                           eval_dataset=data, compute_metrics=compute_metrics, callbacks=callbacks)
 
 

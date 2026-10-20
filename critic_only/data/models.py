@@ -47,13 +47,14 @@ class PrefixRecord(BaseModel):
     source_arm: str
     source_seed: int
     fork: int
-    horizon: int
+    remaining_blocks: int = Field(gt=0)
     split: Literal["train", "validation", "test"]
     messages: list[dict[str, str]]
     phase: Literal["solve", "critique", "revise"]
     response_finished: bool
+    solution_index: int = Field(ge=0)
     reference_solution: str
-    oracle_sketch: str | None
+    oracle_sketch: str
     branches: list[BranchOutcome]
 
     @model_validator(mode="after")
@@ -64,6 +65,6 @@ class PrefixRecord(BaseModel):
             raise ValueError(f"duplicate branch: {self.prefix_id}")
         if not any(item.condition == "continue" for item in self.branches):
             raise ValueError(f"prefix has no ordinary branches: {self.prefix_id}")
-        if any(len(item.outcomes) != self.horizon - self.fork for item in self.branches):
+        if any(len(item.outcomes) != self.remaining_blocks for item in self.branches):
             raise ValueError(f"incomplete future outcome vector: {self.prefix_id}")
         return self

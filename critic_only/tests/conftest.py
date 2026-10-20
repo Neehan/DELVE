@@ -15,8 +15,8 @@ from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
-from frozen_solver.data.models import PreparationConfig
-from frozen_solver.models.models import CriticConfig
+from critic_only.data.models import PreparationConfig
+from critic_only.models.models import CriticConfig
 
 
 @pytest.fixture(autouse=True)

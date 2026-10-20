@@ -14,7 +14,7 @@ class CriticConfig(BaseModel):
     backbone: str
     revision: str
     reference_mode: Literal["none", "solution"]
-    variant: Literal["direct", "auxiliary", "de"]
+    variant: Literal["ordinary", "oracle-supervised", "de"]
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
     lora_rank: int = Field(gt=0)
     lora_alpha: int = Field(gt=0)

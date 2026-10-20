@@ -11,8 +11,8 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModel
 
-from frozen_solver.constants import CONFIG_FILENAME, MODEL_FILENAME, ORACLE, ORDINARY, SUCCESS, TRIALS
-from frozen_solver.models.models import CriticConfig
+from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, ORACLE, ORDINARY, SUCCESS, TRIALS
+from critic_only.models.models import CriticConfig
 
 
 class BaseCritic(nn.Module, ABC):
@@ -27,7 +27,7 @@ class BaseCritic(nn.Module, ABC):
         self.horizons = settings.horizon - 1
 
     @classmethod
-    def from_pretrained(cls, settings: CriticConfig, dtype: torch.dtype) -> Self:
+    def create_from_pretrained(cls, settings: CriticConfig, dtype: torch.dtype) -> Self:
         """Build this critic with a pinned backbone and adapters on attention and MLP layers."""
         backbone = AutoModel.from_pretrained(settings.backbone, revision=settings.revision,
                                              dtype=dtype, attn_implementation=settings.attention)
@@ -37,16 +37,8 @@ class BaseCritic(nn.Module, ABC):
         adapted = get_peft_model(backbone, adapter)
         return cls(adapted, backbone.config.hidden_size, settings)
 
-    def save(self, directory: Path) -> None:
-        """Save adapters, prediction heads, and configuration; Trainer owns optimizer/RNG state."""
-        directory.mkdir(parents=True, exist_ok=True)
-        weights = {name: parameter.detach().cpu().contiguous() for name, parameter in self.named_parameters()
-                   if parameter.requires_grad}
-        save_file(weights, str(directory / MODEL_FILENAME))
-        (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
-
-    def load_weights(self, directory: Path) -> None:
-        """Reject architecture or adapter mismatches before restoring trainable weights."""
+    def load_from_weights(self, directory: Path) -> None:
+        """Restore saved LoRA adapters and critic heads into this model; Trainer restores optimizer state."""
         settings = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
         if settings != self.settings:
             raise ValueError("critic checkpoint configuration differs")
@@ -57,6 +49,14 @@ class BaseCritic(nn.Module, ABC):
         with torch.no_grad():
             for name, parameter in parameters.items():
                 parameter.copy_(weights[name])
+
+    def save(self, directory: Path) -> None:
+        """Save adapters, prediction heads, and configuration; Trainer owns optimizer/RNG state."""
+        directory.mkdir(parents=True, exist_ok=True)
+        weights = {name: parameter.detach().cpu().contiguous() for name, parameter in self.named_parameters()
+                   if parameter.requires_grad}
+        save_file(weights, str(directory / MODEL_FILENAME))
+        (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
 
     def forward(self, input_ids: Tensor, attention_mask: Tensor) -> dict[str, Tensor]:
         """Pool right-padded inputs without materializing vocabulary logits."""
@@ -77,7 +77,7 @@ class BaseCritic(nn.Module, ABC):
         nll = -successes * F.logsigmoid(logits) - (trials - successes) * F.logsigmoid(-logits)
         ordinary = nll[:, ORDINARY].sum(dim=-1) / trials[:, ORDINARY].sum(dim=-1).clamp_min(1)
         oracle = nll[:, ORACLE].sum(dim=-1) / trials[:, ORACLE].sum(dim=-1).clamp_min(1)
-        weight = self.settings.oracle_weight if self.settings.variant != "direct" else 0.0
+        weight = self.settings.oracle_weight if self.settings.variant != "ordinary" else 0.0
         return (ordinary + weight * oracle).mean() + self.regularization(prediction, trials[:, ORDINARY])
 
     def regularization(self, prediction: dict[str, Tensor], trials: Tensor) -> Tensor:
