@@ -18,10 +18,11 @@ from transformers.utils.logging import disable_progress_bar
 from critic_only.constants import (
     DEFAULT_ACCUMULATION_STEPS, DEFAULT_BATCH_SIZE,
     DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
-    DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
+    DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT,
+    DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
 )
-from critic_only.data.processor import select_unaided_examples
+from critic_only.data.processor import select_training_problems, select_unaided_examples
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.eval.metrics import compute_metrics
 from critic_only.models.loader import create_critic_from_pretrained
@@ -38,6 +39,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=DEFAULT_LORA_RANK)
     parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
+    parser.add_argument("--training-problem-fraction", type=float, default=DEFAULT_TRAINING_PROBLEM_FRACTION,
+                        help="fraction of training problems to retain for ablations; validation/test stay unchanged")
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -49,6 +52,8 @@ def parse_arguments() -> argparse.Namespace:
     args = parser.parse_args()
     if min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
         parser.error("training sizes and learning rate must be positive")
+    if not 0 < args.training_problem_fraction <= 1:
+        parser.error("--training-problem-fraction must be in (0, 1]")
     return args
 
 
@@ -104,6 +109,7 @@ def main() -> None:
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
+    dataset["train"] = select_training_problems(dataset["train"], args.training_problem_fraction)
     if args.variant != "ppo-critic" and cached["oracle_supervision_fraction"] == 0:
         raise ValueError("PPOOracleCritic and DECritic require nonzero oracle coverage")
     if args.variant != "ppo-critic" and not any(dataset["train"]["oracle"]):

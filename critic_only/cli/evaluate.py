@@ -42,7 +42,7 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     Dataset.from_dict({"prefix_id": dataset["prefix_id"], "problem_key": keys,
                        "remaining_blocks": dataset["remaining_blocks"],
                        "probability": expit(logits).tolist(), "privileged_probability": privileged,
-                       "counts": labels.tolist()}).to_parquet(str(args.destination / "predictions.parquet"))
+                       "final_correctness": labels.tolist()}).to_parquet(str(args.destination / "predictions.parquet"))
 
 
 def main() -> None:

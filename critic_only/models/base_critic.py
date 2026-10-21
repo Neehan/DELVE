@@ -1,4 +1,4 @@
-"""Shared critic construction, checkpoints, prefix pooling, and count-weighted objective."""
+"""Shared critic construction, checkpoints, history encoding, and terminal-outcome loss."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION, MODEL_FILENAME, SUCCESS_COUNT_INDEX, TRIAL_COUNT_INDEX
+from critic_only.constants import CONFIG_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION, MODEL_FILENAME
 from critic_only.models.models import CriticConfig
 
 
@@ -73,26 +73,21 @@ class BaseCritic(nn.Module, ABC):
         """Return one terminal-value logit per history [views]; DE uses remaining_blocks to select its horizon."""
         raise NotImplementedError
 
-    def loss(self, logits: Tensor, counts: Tensor, oracle: Tensor) -> Tensor:
-        """Compute one count-weighted prediction loss per actual solver history.
+    def loss(self, logits: Tensor, labels: Tensor, oracle: Tensor) -> Tensor:
+        """Compute binary cross-entropy for each observed solver history.
 
         Args:
             logits: Predicted terminal success logits [examples] for each actual history.
-            counts: Labels [examples, 2], with [successful branches, total branches]. Success grades the last answer when the remaining budget is exhausted, not any earlier answer.
+            labels: Binary final correctness [examples]. Success grades the last answer when the remaining budget is exhausted, not any earlier answer.
             oracle: Boolean mask [examples] identifying histories with an injected sketch, used only for loss weighting.
 
-        For successes s, trials n, and probability p = sigmoid(logit), the negative log-likelihood is -s*log(p) - (n-s)*log(1-p). Thus [3, 8] represents three successes and five failures. The parameter-independent binomial coefficient is omitted.
-
-        Divide by the number of observed branches for this history, giving each history equal weight regardless of branch count. Only terminal outcomes contribute; earlier checkpoints are not auxiliary targets.
+        For label y and probability p = sigmoid(logit), the loss is -y*log(p) - (1-y)*log(1-p). Compute directly from logits for numerical stability. Earlier checkpoint grades are not auxiliary targets.
 
         Oracle examples receive oracle_weight; unaided examples receive weight one. PPOCritic training excludes oracle examples before batching.
 
         Returns:
-            Losses [examples], without batch averaging. BaseTrainer averages the paired reference/no-reference losses for each example, then averages examples. References and generated oracle sketches are distinct inputs.
+            Losses [examples], without batch averaging. BaseTrainer averages the paired reference/no-reference losses for each example, then averages examples. Critic-only references and solver-visible sketches are distinct inputs.
         """
-        logits = logits.float()
-        successes, trials = counts[..., SUCCESS_COUNT_INDEX], counts[..., TRIAL_COUNT_INDEX]
-        nll = -successes * F.logsigmoid(logits) - (trials - successes) * F.logsigmoid(-logits)
-        normalized = nll / trials
+        losses = F.binary_cross_entropy_with_logits(logits.float(), labels.float(), reduction="none")
         weight = torch.where(oracle, self.settings.oracle_weight, 1.0)
-        return weight * normalized
+        return weight * losses

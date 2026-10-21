@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from discovery_execution.harness.constants import MAX_BLOCKS
 
@@ -23,16 +23,16 @@ class PreparationConfig(BaseModel):
 
 
 class BranchOutcome(BaseModel):
-    """Retain seed-level outcomes, including later regressions, for resampling studies."""
+    """Record the final binary grade and the saved trajectory that produced it."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     seed: int = Field(ge=0)
-    outcomes: list[Literal[0, 1]]
+    final_correctness: Literal[0, 1]
     path: str
 
 
 class InputPrefix(BaseModel):
-    """One actual solver history and the outcomes of branches continuing that history."""
+    """One branch history after its first block, paired with its final outcome."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     prefix_id: str
@@ -46,16 +46,4 @@ class InputPrefix(BaseModel):
     response_finished: bool
     solution_index: int = Field(ge=0)
     reference_solution: str | None
-    branches: list[BranchOutcome]
-
-    @model_validator(mode="after")
-    def validate_branches(self) -> "InputPrefix":
-        """Require unique independent branch identities and complete future outcome vectors."""
-        identities = [item.seed for item in self.branches]
-        if len(identities) != len(set(identities)):
-            raise ValueError(f"duplicate branch: {self.prefix_id}")
-        if not self.branches:
-            raise ValueError(f"history has no continuation branches: {self.prefix_id}")
-        if any(len(item.outcomes) != self.remaining_blocks for item in self.branches):
-            raise ValueError(f"incomplete future outcome vector: {self.prefix_id}")
-        return self
+    branch: BranchOutcome

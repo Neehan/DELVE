@@ -1,4 +1,4 @@
-"""Tokenize critic inputs once and retain branch counts separately from privileged references."""
+"""Tokenize critic inputs once and retain binary labels separately from privileged references."""
 
 import hashlib
 import json
@@ -18,7 +18,7 @@ from critic_only.data.processor import selection_fraction
 
 
 class PrefixTokenizer:
-    """Cache variable-length tokens and terminal success/trial counts; never truncate a saved prefix."""
+    """Cache variable-length tokens and binary terminal labels; never truncate a saved prefix."""
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         """Require right padding and a pad token for the critic's pooling convention."""
@@ -50,7 +50,7 @@ class PrefixTokenizer:
     def encode(self, row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         """Apply the model's chat template to critic instructions and the history being evaluated.
 
-        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. Labels are [successful branches, total branches] at the final budget; earlier correctness is not a training target.
+        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. Each branch supplies one scalar final binary outcome; earlier grades are neither inputs nor training targets.
         """
         record = InputPrefix.model_validate(dict(row))
         conversation = "\n\n".join(f"{item['role']}:\n{item['content']}" for item in record.messages)
@@ -65,16 +65,14 @@ class PrefixTokenizer:
             privileged_system = system + "\n\n" + self.reference_prompt.format(solution=record.reference_solution)
             privileged_messages = [{"role": "system", "content": privileged_system}, messages[1]]
             privileged_ids = self._encode_messages(privileged_messages, settings["max_length"], record.prefix_id)
-        branches = record.branches
-        counts = [sum(item.outcomes[-1] for item in branches), len(branches)]
         return {"input_ids": token_ids, "privileged_input_ids": privileged_ids,
-                "labels": counts, "remaining_blocks": record.remaining_blocks,
+                "labels": record.branch.final_correctness, "remaining_blocks": record.remaining_blocks,
                 "length": len(privileged_ids) if privileged_ids is not None else len(token_ids),
                 "prefix_id": record.prefix_id, "problem_key": record.problem_key,
                 "oracle": record.oracle}
 
     def _retain_example(self, row: dict[str, Any], settings: dict[str, Any]) -> bool:
-        """Limit oracle training problems without retaining empty-label examples or changing evaluation."""
+        """Limit oracle training problems while retaining all unaided and evaluation histories."""
         return (row["split"] != "train" or not row["oracle"]
                 or selection_fraction(f"oracle:{row['problem_key']}", settings["seed"]) < settings["oracle_supervision_fraction"])
 

@@ -1,4 +1,4 @@
-"""Proper scoring rules against individual binary outcomes, including finite-sample target noise."""
+"""Binary prediction scores averaged within problems and then across problems."""
 
 from typing import Any, cast
 
@@ -6,16 +6,11 @@ import numpy as np
 from scipy.special import expit
 from transformers import EvalPrediction
 
-from critic_only.constants import OUTCOME_COUNT_FIELDS, PROBABILITY_EPSILON, SUCCESS_COUNT_INDEX, TRIAL_COUNT_INDEX
 
-
-def outcome_scores(probability: np.ndarray, counts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return binary NLL and Brier for counts [..., success/trial], normalized over recorded trials."""
-    probability = np.clip(probability, PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
-    successes, trials = counts[..., SUCCESS_COUNT_INDEX], counts[..., TRIAL_COUNT_INDEX]
-    nll = -(successes * np.log(probability) + (trials - successes) * np.log1p(-probability))
-    brier = successes * (1 - probability) ** 2 + (trials - successes) * probability ** 2
-    return nll / np.maximum(trials, 1), brier / np.maximum(trials, 1)
+def outcome_scores(logits: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute binary NLL directly from logits and Brier from probabilities, without clipping."""
+    nll = labels * np.logaddexp(0, -logits) + (1 - labels) * np.logaddexp(0, logits)
+    return nll, (expit(logits) - labels) ** 2
 
 
 def compute_metrics(prediction: EvalPrediction, problem_keys: list[str]) -> dict[str, float]:
@@ -36,9 +31,9 @@ def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list
     """Score scalar terminal predictions, averaging prefixes within problems before averaging problems."""
     if len(problem_keys) != len(logits) or len(labels) != len(logits):
         raise ValueError("evaluation problem identities, predictions, and labels must have equal lengths")
-    if logits.ndim != 1 or labels.shape != (len(logits), OUTCOME_COUNT_FIELDS) or np.any(labels[:, TRIAL_COUNT_INDEX] <= 0):
-        raise ValueError("evaluation requires scalar logits and nonempty terminal success/trial counts")
-    nll, brier = outcome_scores(expit(logits), labels)
+    if logits.ndim != 1 or labels.shape != logits.shape or not np.isin(labels, [0, 1]).all():
+        raise ValueError("evaluation requires scalar logits and binary final labels")
+    nll, brier = outcome_scores(logits, labels)
     problems = sorted(set(problem_keys))
     per_problem = []
     identities = np.asarray(problem_keys)

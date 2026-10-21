@@ -17,7 +17,8 @@ from critic_only.models.models import CriticConfig
 
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
-def test_train_and_evaluate_cli(variant: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+@pytest.mark.parametrize("fraction", [1.0, 0.5])
+def test_train_and_evaluate_cli(variant: str, fraction: float, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                                 training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: Any,
                                 capsys: pytest.CaptureFixture[str]) -> None:
     """Use the public CPU smoke-test path, select best on validation, and write terminal test metrics."""
@@ -30,17 +31,23 @@ def test_train_and_evaluate_cli(variant: str, critic_settings: Callable[[str], C
         rows = training_rows + [{**training_rows[0], "oracle": True}]
         splits[split] = Dataset.from_list([{**row, "prefix_id": f"{split}-{index}", "problem_key": f"{split}-{index}"}
                                           for index, row in enumerate(rows)])
+    splits["train"] = Dataset.from_list([
+        {**row, "oracle": oracle, "problem_key": f"train-{index}", "prefix_id": f"train-{index}-{oracle}"}
+        for index, row in enumerate(training_rows) for oracle in (False, True)
+    ])
     DatasetDict(splits).save_to_disk(str(cache))
     tokenizer.save_pretrained(cache / "tokenizer")
     manifest = {"settings": {"model": settings.model, "revision": settings.revision,
                              "oracle_supervision_fraction": 1, "max_length": 256}, "preparation": {"settings": {"horizon": 3}}}
     (cache / MANIFEST_FILENAME).write_text(json.dumps(manifest))
     monkeypatch.setattr("sys.argv", ["train", "--data", str(cache), "--output", str(output), "--variant", variant,
-                                     "--rank", "2", "--lora-alpha", "4", "--epochs", "1", "--accumulation-steps", "1", "--cpu"])
+                                     "--rank", "2", "--lora-alpha", "4", "--epochs", "1", "--accumulation-steps", "1", "--cpu",
+                                     *(["--training-problem-fraction", str(fraction)] if fraction != 1 else [])])
     train.main()
     assert list(trainer_factory.call_args.kwargs["train_dataset"]["oracle"]) == (
-        [False, False] if variant == "ppo-critic" else [False, False, True])
+        [False] * int(2 * fraction) if variant == "ppo-critic" else [False, True] * int(2 * fraction))
     assert list(trainer_factory.call_args.kwargs["eval_dataset"]["oracle"]) == [False, False]
+    assert json.loads((output / "training.json").read_text())["options"]["training_problem_fraction"] == fraction
     state = json.loads((output / "trainer_state.json").read_text())
     loss_record = next(row for row in state["log_history"] if "loss" in row)
     assert {"step", "epoch", "learning_rate", "grad_norm"} <= loss_record.keys()
@@ -60,12 +67,25 @@ def test_train_and_evaluate_cli(variant: str, critic_settings: Callable[[str], C
     assert 0 <= metrics["without_reference"]["terminal_brier"] <= 1
     assert (report / "predictions.parquet").is_file()
     predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
+    assert predictions["final_correctness"] == [row["labels"] for row in training_rows]
+    assert "counts" not in predictions.column_names
     assert predictions[0]["privileged_probability"] is not None
     assert predictions[1]["privileged_probability"] is None
 
 
+@pytest.mark.parametrize("fraction", ["0", "-0.5", "1.1", "nan", "inf"])
+def test_invalid_training_fraction_fails_before_loading(fraction: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject invalid fractions before reading caches or initializing models."""
+    load = Mock()
+    monkeypatch.setattr(train, "load_from_disk", load)
+    monkeypatch.setattr("sys.argv", ["train", "--training-problem-fraction", fraction])
+    with pytest.raises(SystemExit):
+        train.main()
+    load.assert_not_called()
+
+
 def test_hf_download_selects_only_needed_snapshots(prepared_inputs: PreparationConfig, monkeypatch: Any) -> None:
-    """Pin both download stages to one commit and avoid fetching every full branch conversation."""
+    """Pin downloads and request conversations for input phases but no later checkpoint files."""
     api = Mock()
     api.dataset_info.return_value.sha = "pinned-commit"
     download = Mock(return_value=str(prepared_inputs.outputs_directory))
@@ -76,7 +96,9 @@ def test_hf_download_selects_only_needed_snapshots(prepared_inputs: PreparationC
     assert download.call_count == 2
     selected = download.call_args_list[-1].kwargs["allow_patterns"]
     assert all("*" not in path for path in selected)
-    assert all("unaided" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert any("continue-oracle" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert any("continue-at" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert not any(path.endswith("checkpoint_3x.json.zst") for path in selected)
     assert all(call.kwargs["revision"] == "pinned-commit" for call in download.call_args_list)
 
 
@@ -103,7 +125,8 @@ def test_setup_cli(prepared_inputs: PreparationConfig, tokenizer: PreTrainedToke
         setup.main()
         assert (destination / "prepared" / "test.parquet").is_file()
         cache = load_from_disk(str(destination / "tokenized"))
-        assert cache["test"][0]["labels"] == [1, 2]
+        assert cache["test"][0]["labels"] == 0
+        assert len(cache["test"]) == 5
         manifest = json.loads((destination / "tokenized" / MANIFEST_FILENAME).read_text())
         assert manifest["settings"]["model"] == "owner/tiny"
         assert manifest["settings"]["revision"] == "model-commit"
