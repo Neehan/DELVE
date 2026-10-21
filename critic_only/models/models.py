@@ -13,7 +13,7 @@ class CriticConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     model: str
     revision: str
-    variant: Literal["ordinary", "oracle-supervised", "de"]
+    variant: Literal["ppo-critic", "ppo-oracle-critic", "de-critic"]
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
     lora_rank: int = Field(gt=0)
     lora_alpha: int = Field(gt=0)

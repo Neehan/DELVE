@@ -74,14 +74,14 @@ def test_oracle_history_contains_only_saved_intervention(prepared_inputs: Prepar
         path.write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
     DatasetProcessor(prepared_inputs).run()
     rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))
-    ordinary, oracle = dict(rows[0]), dict(rows[1])
-    assert not ordinary["oracle"] and oracle["oracle"]
-    assert oracle["messages"] == ordinary["messages"] + [{"role": "user", "content": injection}]
+    unaided, oracle = dict(rows[0]), dict(rows[1])
+    assert not unaided["oracle"] and oracle["oracle"]
+    assert oracle["messages"] == unaided["messages"] + [{"role": "user", "content": injection}]
     assert oracle["phase"] == "solve" and oracle["response_finished"] is False
-    assert all("FUTURE ANSWER" not in message["content"] for row in (ordinary, oracle) for message in row["messages"])
+    assert all("FUTURE ANSWER" not in message["content"] for row in (unaided, oracle) for message in row["messages"])
     settings = {"max_length": 256, "oracle_supervision_fraction": 1, "seed": 1234}
     processor = PrefixTokenizer(tokenizer)
-    plain, injected = processor.encode(dict(ordinary), settings), processor.encode(dict(oracle), settings)
+    plain, injected = processor.encode(dict(unaided), settings), processor.encode(dict(oracle), settings)
     assert not plain["oracle"] and injected["oracle"]
     assert len(injected["input_ids"]) > len(plain["input_ids"])
     assert plain["labels"] == [1, 2]

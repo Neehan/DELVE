@@ -21,7 +21,7 @@ class DECritic(BaseCritic):
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Return the DE value at each history's remaining budget, or its execution value for oracle histories.
 
-        All heads read the supplied history. Oracle examples supervise execution after the actual sketch; ordinary examples use the shared execution head inside the discovery convolution. Transferring that structure across histories is an inductive bias, not an identified causal decomposition.
+        All heads read the supplied history. Oracle examples supervise execution after the actual sketch; unaided examples use the shared execution head inside the discovery convolution. Transferring that structure across histories is an inductive bias, not an identified causal decomposition.
         """
         # Keep probabilities in FP32: BF16 rounds the upper clamp bound to exactly one.
         discovered, alpha = self.acquisition(hidden).float().sigmoid().unbind(dim=-1)

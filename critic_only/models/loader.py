@@ -11,10 +11,10 @@ from critic_only.models.ppo_critic import PPOCritic
 
 def create_critic_from_pretrained(settings: CriticConfig, dtype: torch.dtype) -> BaseCritic:
     """Load a pretrained model and fresh heads for the validated critic variant."""
-    if settings.variant == "de":
+    if settings.variant == "de-critic":
         return DECritic.create_from_pretrained(settings, dtype)
-    if settings.variant == "oracle-supervised":
+    if settings.variant == "ppo-oracle-critic":
         return PPOOracleCritic.create_from_pretrained(settings, dtype)
-    if settings.variant == "ordinary":
+    if settings.variant == "ppo-critic":
         return PPOCritic.create_from_pretrained(settings, dtype)
     raise ValueError(f"unknown critic variant: {settings.variant}")

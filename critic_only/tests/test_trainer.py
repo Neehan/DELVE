@@ -38,7 +38,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                  rows: list[dict[str, Any]], callbacks: list[TrainerCallback]) -> BaseTrainer:
     """Use real Trainer accumulation, evaluation, and checkpoint selection on a tiny CPU model."""
     set_seed(17)
-    critic_type = DECritic if settings.variant == "de" else PPOOracleCritic if settings.variant == "oracle-supervised" else PPOCritic
+    critic_type = DECritic if settings.variant == "de-critic" else PPOOracleCritic if settings.variant == "ppo-oracle-critic" else PPOCritic
     model = critic_type.create_from_pretrained(settings, torch.float32)
     data = Dataset.from_list(rows)
     args = TrainingArguments(output_dir=str(directory), max_steps=4, per_device_train_batch_size=1,
@@ -56,7 +56,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
 def test_training_resume(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                          training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
-    settings = critic_settings("de")
+    settings = critic_settings("de-critic")
     full = make_trainer(tmp_path / "full", settings, tokenizer, training_rows, [])
     full.train()
     interrupted = make_trainer(tmp_path / "resumed", settings, tokenizer, training_rows, [InterruptTraining()])
@@ -80,7 +80,7 @@ def test_metrics_persist_before_checkpoint(critic_settings: Callable[[str], Crit
                                           training_rows: list[dict[str, Any]], tmp_path: Path,
                                           monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """Persist each log before any checkpoint exists, with no duplicate writes from other ranks."""
-    trainer = make_trainer(tmp_path / "run", critic_settings("de"), tokenizer, training_rows, [])
+    trainer = make_trainer(tmp_path / "run", critic_settings("de-critic"), tokenizer, training_rows, [])
     trainer.log({"loss": 0.5, "learning_rate": 0.001})
     path = tmp_path / "run" / "trainer_state.json"
     saved = path.read_bytes()
@@ -93,13 +93,13 @@ def test_metrics_persist_before_checkpoint(critic_settings: Callable[[str], Crit
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("variant", ["ordinary", "oracle-supervised", "de"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("references", [(False, False), (True, True), (False, True)])
 def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
                                  critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                                  training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Match independent per-example losses and gradients, including rows with missing references."""
-    rows = [{**row, "oracle": variant != "ordinary" and index == 1,
+    rows = [{**row, "oracle": variant != "ppo-critic" and index == 1,
              "privileged_input_ids": row["input_ids"] + [3, 3] if present else None}
             for index, (row, present) in enumerate(zip(training_rows, references))]
     trainer = make_trainer(tmp_path / "run", critic_settings(variant), tokenizer, rows, [])

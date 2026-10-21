@@ -18,14 +18,14 @@ DEFAULT_ORACLE_WEIGHT = 1.0
 DEFAULT_ATTENTION = "flash_attention_2"
 CPU_ATTENTION = "sdpa"
 PAIRED_INPUT_WEIGHT = 0.5
-DEFAULT_VARIANT = "ordinary"
+DEFAULT_VARIANT = "ppo-critic"
 DEFAULT_WARMUP_RATIO = 0.05
 DEFAULT_WEIGHT_DECAY = 0.01
 DEFAULT_LOGGING_STEPS = 10
 PROBABILITY_EPSILON = 1e-6
 HASH_SCALE = 2**256
 SPLITS = ("train", "validation", "test")
-VARIANTS = ("ordinary", "oracle-supervised", "de")
+VARIANTS = ("ppo-critic", "ppo-oracle-critic", "de-critic")
 CONDITIONS = ("continue", "continue-oracle")
 # Final count axis: [successful branches, total branches].
 SUCCESS_COUNT_INDEX = 0

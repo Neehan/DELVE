@@ -29,7 +29,7 @@ class PrefixTokenizer:
         self.reference_prompt = REFERENCE_PROMPT_PATH.read_text().strip()
 
     def pad_batch(self, rows: list[dict[str, Any]]) -> dict[str, Tensor]:
-        """Pad ordinary then available privileged views; labels retain one row per prefix.
+        """Pad unprivileged then available privileged views; labels retain one row per prefix.
 
         privileged_indices maps appended views back to prefixes; input and label batch sizes can differ.
         """
