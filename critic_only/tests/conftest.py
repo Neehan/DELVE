@@ -48,7 +48,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
                                                 lora_rank=2, lora_alpha=4,
-                                                oracle_weight=1, attention="eager"))
+                                                oracle_weight=1))
 
     return create
 

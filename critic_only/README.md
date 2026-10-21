@@ -6,11 +6,11 @@ Learn to predict whether a frozen solver's final answer will be correct after us
 2. **Input and prediction:** The model's chat template places critic instructions in the system message and the saved trajectory in the user message. One transformer forward reads the whole input; its last non-padding hidden state produces one scalar probability of final-budget success. The critic does not generate an answer as text.
 3. **Training:** Initialize from the solver's model and train LoRA adapters plus prediction heads using binary outcome likelihood from the counts. When a matching reference solution exists, also encode a second view with that solution in the system message, explicitly unavailable to the solver. Average the two losses, not the predictions. The reference follows the solution selection recorded during collection.
 
-| Variant | Training histories | Prediction |
+| Variant / class | Training histories | Prediction |
 |---|---|---|
-| `ordinary` | Ordinary only | Direct scalar head |
-| `oracle-supervised` | Ordinary and sketch-injected | Same direct scalar head |
-| `de` | Ordinary and sketch-injected | Discovery–execution formula evaluated at the remaining budget |
+| `ordinary` / `PPOCritic` | Ordinary only | Direct scalar head |
+| `oracle-supervised` / `PPOOracleCritic` | Ordinary and sketch-injected | Same direct scalar head |
+| `de` / `DECritic` | Ordinary and sketch-injected | Discovery–execution formula evaluated at the remaining budget |
 
 DE learns discovery and execution parameters internally, but only its final scalar is supervised. Compare it with `oracle-supervised` to test the structural prior under the same supervision.
 
@@ -26,7 +26,7 @@ for variant in ordinary oracle-supervised de; do
 done
 ```
 
-Defaults use BF16, LoRA rank 32, one prefix per GPU, gradient accumulation 8, and gradient checkpointing. Adjust `--batch-size` and `--accumulation-steps` to fit memory. Training logs metrics and saves resumable epoch checkpoints; use `--resume <checkpoint-directory>` after interruption.
+GPU training uses FlashAttention-2 and BF16; install a compatible FlashAttention-2 kernel in the training environment. Defaults use LoRA rank 32, one prefix per GPU, gradient accumulation 8, and gradient checkpointing. Adjust `--batch-size` and `--accumulation-steps` to fit memory. Training logs metrics and saves resumable epoch checkpoints; use `--resume <checkpoint-directory>` after interruption.
 
 Every epoch evaluates ordinary validation histories. The best checkpoint minimizes final-outcome NLL without references, averaged per problem, and is saved under `best/`. After choosing settings on validation, evaluate the held-out test set:
 

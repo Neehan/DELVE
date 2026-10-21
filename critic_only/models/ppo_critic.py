@@ -8,8 +8,8 @@ from critic_only.models.base_critic import BaseCritic
 from critic_only.models.models import CriticConfig
 
 
-class Ordinary(BaseCritic):
-    """Predict success from the supplied history; OracleSupervised shares this same head."""
+class PPOCritic(BaseCritic):
+    """Predict success from the supplied history; PPOOracleCritic shares this same head."""
 
     def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
         """Use identical head capacity for the ordinary and oracle-supervised baselines."""

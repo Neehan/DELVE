@@ -18,4 +18,3 @@ class CriticConfig(BaseModel):
     lora_rank: int = Field(gt=0)
     lora_alpha: int = Field(gt=0)
     oracle_weight: float = Field(ge=0)
-    attention: Literal["sdpa", "flash_attention_2", "eager"]

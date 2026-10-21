@@ -15,7 +15,7 @@ from critic_only.constants import MODEL_FILENAME, PROBABILITY_EPSILON
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
-from critic_only.models.ordinary import Ordinary
+from critic_only.models.ppo_critic import PPOCritic
 from critic_only.models.loader import create_critic_from_pretrained
 from critic_only.models.models import CriticConfig
 
@@ -25,7 +25,7 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
                                    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Only adapters and heads train; compact checkpoints reproduce predictions exactly."""
     model = create_critic_from_pretrained(critic_settings(variant), torch.float32)
-    assert type(model).__name__ == {"ordinary": "Ordinary", "oracle-supervised": "OracleSupervised", "de": "DECritic"}[variant]
+    assert type(model).__name__ == {"ordinary": "PPOCritic", "oracle-supervised": "PPOOracleCritic", "de": "DECritic"}[variant]
     batch = PrefixTokenizer(tokenizer).pad_batch(training_rows)
     counts = batch.pop("labels")
     batch = {key: batch[key][:len(counts)] for key in ("input_ids", "attention_mask", "oracle", "remaining_blocks")}
@@ -50,7 +50,7 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
 
 def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
     """Reject broadcastable checkpoint tensors before modifying any model parameter."""
-    model = Ordinary.create_from_pretrained(critic_settings("ordinary"), torch.float32)
+    model = PPOCritic.create_from_pretrained(critic_settings("ordinary"), torch.float32)
     original = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     directory = tmp_path / "checkpoint"
     model.save(directory)
@@ -65,7 +65,7 @@ def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str
 
 def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Aggregated labels use the same likelihood as their individual Bernoulli observations."""
-    model = Ordinary.create_from_pretrained(critic_settings("ordinary"), torch.float32)
+    model = PPOCritic.create_from_pretrained(critic_settings("ordinary"), torch.float32)
     logits = torch.tensor([0.7], requires_grad=True)
     counts = torch.tensor([[2, 3]]).float()
     loss = model.loss(logits, counts, torch.tensor([False])).mean()

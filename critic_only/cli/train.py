@@ -16,7 +16,7 @@ from transformers import AutoConfig, AutoTokenizer, TrainingArguments, set_seed
 from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
-    DEFAULT_ACCUMULATION_STEPS, DEFAULT_ATTENTION, DEFAULT_BATCH_SIZE,
+    DEFAULT_ACCUMULATION_STEPS, DEFAULT_BATCH_SIZE,
     DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
     DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
@@ -38,7 +38,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=DEFAULT_LORA_RANK)
     parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
-    parser.add_argument("--attention", choices=("sdpa", "flash_attention_2", "eager"), default=DEFAULT_ATTENTION)
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -101,8 +100,7 @@ def main() -> None:
     cached = manifest["settings"]
     settings = CriticConfig(model=cached["model"], revision=cached["revision"], variant=args.variant,
                             horizon=manifest["preparation"]["settings"]["horizon"], lora_rank=args.rank,
-                            lora_alpha=args.lora_alpha, oracle_weight=args.oracle_weight,
-                            attention=args.attention)
+                            lora_alpha=args.lora_alpha, oracle_weight=args.oracle_weight)
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")

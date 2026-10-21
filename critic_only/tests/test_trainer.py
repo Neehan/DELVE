@@ -18,8 +18,8 @@ from critic_only.eval.metrics import compute_metrics
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
 from critic_only.models.models import CriticConfig
-from critic_only.models.ordinary import Ordinary
-from critic_only.models.oracle_supervised import OracleSupervised
+from critic_only.models.ppo_critic import PPOCritic
+from critic_only.models.ppo_oracle_critic import PPOOracleCritic
 from critic_only.trainer.base_trainer import BaseTrainer
 
 
@@ -38,7 +38,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                  rows: list[dict[str, Any]], callbacks: list[TrainerCallback]) -> BaseTrainer:
     """Use real Trainer accumulation, evaluation, and checkpoint selection on a tiny CPU model."""
     set_seed(17)
-    critic_type = DECritic if settings.variant == "de" else OracleSupervised if settings.variant == "oracle-supervised" else Ordinary
+    critic_type = DECritic if settings.variant == "de" else PPOOracleCritic if settings.variant == "oracle-supervised" else PPOCritic
     model = critic_type.create_from_pretrained(settings, torch.float32)
     data = Dataset.from_list(rows)
     args = TrainingArguments(output_dir=str(directory), max_steps=4, per_device_train_batch_size=1,

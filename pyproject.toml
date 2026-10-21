@@ -33,7 +33,7 @@ frozen = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["discovery_execution/tests"]
+testpaths = ["discovery_execution/tests", "critic_only/tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

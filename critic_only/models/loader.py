@@ -5,8 +5,8 @@ import torch
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
 from critic_only.models.models import CriticConfig
-from critic_only.models.oracle_supervised import OracleSupervised
-from critic_only.models.ordinary import Ordinary
+from critic_only.models.ppo_oracle_critic import PPOOracleCritic
+from critic_only.models.ppo_critic import PPOCritic
 
 
 def create_critic_from_pretrained(settings: CriticConfig, dtype: torch.dtype) -> BaseCritic:
@@ -14,7 +14,7 @@ def create_critic_from_pretrained(settings: CriticConfig, dtype: torch.dtype) ->
     if settings.variant == "de":
         return DECritic.create_from_pretrained(settings, dtype)
     if settings.variant == "oracle-supervised":
-        return OracleSupervised.create_from_pretrained(settings, dtype)
+        return PPOOracleCritic.create_from_pretrained(settings, dtype)
     if settings.variant == "ordinary":
-        return Ordinary.create_from_pretrained(settings, dtype)
+        return PPOCritic.create_from_pretrained(settings, dtype)
     raise ValueError(f"unknown critic variant: {settings.variant}")

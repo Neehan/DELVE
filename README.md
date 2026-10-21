@@ -8,7 +8,7 @@ The frozen-solver critic takes the partial conversation, current phase, and rema
 
 Training labels come from continuing the same self-refinement harness and grading the last boxed answer: 1 if correct, 0 otherwise; earlier correct answers do not override the final grade.
 
-[Critic-only experiments](critic_only/README.md) prepare cached training data and compare Ordinary, OracleSupervised, and DECritic LoRA models before online RL.
+[Critic-only experiments](critic_only/README.md) prepare cached training data and compare PPOCritic, PPOOracleCritic, and DECritic LoRA models before online RL.
 
 **Environment**
 

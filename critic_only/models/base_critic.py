@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, SUCCESS_COUNT_INDEX, TRIAL_COUNT_INDEX
+from critic_only.constants import CONFIG_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION, MODEL_FILENAME, SUCCESS_COUNT_INDEX, TRIAL_COUNT_INDEX
 from critic_only.models.models import CriticConfig
 
 
@@ -27,9 +27,10 @@ class BaseCritic(nn.Module, ABC):
 
     @classmethod
     def create_from_pretrained(cls, settings: CriticConfig, dtype: torch.dtype) -> Self:
-        """Build this critic with a pinned model and adapters on attention and MLP layers."""
+        """Build a pinned LoRA critic with FlashAttention-2; float32 CPU smoke tests use SDPA."""
+        attention = CPU_ATTENTION if dtype == torch.float32 else DEFAULT_ATTENTION
         model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
-                                          dtype=dtype, attn_implementation=settings.attention)
+                                          dtype=dtype, attn_implementation=attention)
         model.config.use_cache = False
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         adapter = LoraConfig(r=settings.lora_rank, lora_alpha=settings.lora_alpha, target_modules="all-linear")
