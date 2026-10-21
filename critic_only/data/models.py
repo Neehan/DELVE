@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from discovery_execution.harness.constants import MAX_BLOCKS
 
@@ -23,16 +23,16 @@ class PreparationConfig(BaseModel):
 
 
 class BranchOutcome(BaseModel):
-    """Retain seed-level outcomes, including later regressions, for resampling studies."""
+    """Record the final binary grade and the saved trajectory that produced it."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     seed: int = Field(ge=0)
-    outcomes: list[Literal[0, 1]]
+    final_correctness: Literal[0, 1]
     path: str
 
 
 class InputPrefix(BaseModel):
-    """One branch history after its first block, with its own subsequent outcomes."""
+    """One branch history after its first block, paired with its final outcome."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     prefix_id: str
@@ -47,10 +47,3 @@ class InputPrefix(BaseModel):
     solution_index: int = Field(ge=0)
     reference_solution: str | None
     branch: BranchOutcome
-
-    @model_validator(mode="after")
-    def validate_outcomes(self) -> "InputPrefix":
-        """Require one future grade per remaining block, excluding the observed input checkpoint."""
-        if len(self.branch.outcomes) != self.remaining_blocks:
-            raise ValueError(f"incomplete future outcome vector: {self.prefix_id}")
-        return self

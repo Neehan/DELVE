@@ -128,7 +128,7 @@ def training_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": [0, 2]},
+             "oracle": False, "remaining_blocks": 2, "labels": 0},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "remaining_blocks": 1, "labels": [1, 2]}]
+             "oracle": False, "remaining_blocks": 1, "labels": 1}]

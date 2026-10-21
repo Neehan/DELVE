@@ -13,9 +13,30 @@ from transformers import PreTrainedTokenizerFast
 
 from critic_only.constants import CRITIC_PROMPT_PATH, MANIFEST_FILENAME, REFERENCE_PROMPT_PATH
 from critic_only.data.models import PreparationConfig
-from critic_only.data.processor import DatasetProcessor, select_input_fork, selection_fraction
+from critic_only.data.processor import DatasetProcessor, select_input_fork, select_training_problems, selection_fraction
 from critic_only.tests.conftest import write_run
 from critic_only.data.tokenizer import PrefixTokenizer
+
+
+def test_training_problem_subsets_are_nested_and_keep_branches() -> None:
+    """Select exact problem counts independent of row order, retaining both conditions together."""
+    dataset = Dataset.from_list([
+        {"problem_key": f"problem-{problem}", "oracle": oracle, "seed": seed}
+        for problem in range(8) for oracle in (False, True) for seed in range(2)
+    ])
+    quarter = select_training_problems(dataset, 0.25)
+    half = select_training_problems(dataset, 0.5)
+    reordered = select_training_problems(dataset.select(list(reversed(range(len(dataset))))), 0.5)
+    assert len(quarter) == 8 and len(half) == 16
+    assert set(quarter["problem_key"]) < set(half["problem_key"])
+    assert set(half["problem_key"]) == set(reordered["problem_key"])
+    for key in set(half["problem_key"]):
+        assert [row for row in half.to_list() if row["problem_key"] == key] == [
+            row for row in dataset.to_list() if row["problem_key"] == key
+        ]
+    assert select_training_problems(dataset, 1.0).to_list() == dataset.to_list()
+    with pytest.raises(ValueError, match="selects no problems"):
+        select_training_problems(dataset, 0.01)
 
 
 def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: PreTrainedTokenizerFast, tmp_path: Path) -> None:
@@ -23,7 +44,7 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     DatasetProcessor(prepared_inputs).run()
     rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
     row = next(dict(row) for row in rows if row["fork"] == 1 and not row["oracle"] and row["branch"]["seed"] == 0)
-    assert row["branch"]["outcomes"] == [0]
+    assert row["branch"]["final_correctness"] == 0
     assert row["messages"][-1]["content"] == "Observed continue branch 0"
     assert len(rows) == 5
     assert row["remaining_blocks"] == 1 and "horizon" not in row
@@ -34,7 +55,7 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     assert not {"fork", "attention_mask", "horizon"} & encoded.keys()
     assert len(encoded["privileged_input_ids"]) > len(encoded["input_ids"])
     assert "reference_solution" not in encoded
-    assert encoded["labels"] == [0, 1]
+    assert encoded["labels"] == 0
     assert encoded["remaining_blocks"] == 1
     row["split"] = "train"
     assert processor._retain_example(row, settings)
@@ -75,7 +96,7 @@ def test_oracle_history_contains_solver_response(prepared_inputs: PreparationCon
         assert row["phase"] == "critique" and row["response_finished"] is True
         assert all("FINAL FUTURE" not in message["content"] for message in row["messages"])
         encoded = processor.encode(row, {"max_length": 256})
-        assert encoded["labels"] == [row["branch"]["seed"], 1]
+        assert encoded["labels"] == row["branch"]["seed"]
         assert encoded["remaining_blocks"] == 1
     assert len({row["prefix_id"] for row in rows}) == len(rows)
 
@@ -146,14 +167,14 @@ def test_all_branches_and_independent_oracle_selection(prepared_inputs: Preparat
     processor = PrefixTokenizer(tokenizer)
     settings = {"max_length": 256, "oracle_supervision_fraction": 0.25,
                 "seed": 42}
-    assert processor.encode(row, settings)["labels"][1] == 1
+    assert processor.encode(row, settings)["labels"] == row["branch"]["final_correctness"]
     row["split"] = "train"
     key = next(f"problem-{i}" for i in range(1000)
                if selection_fraction(f"problem-{i}", 42) > 0.5
                and selection_fraction(f"oracle:problem-{i}", 42) < 0.25)
     row["problem_key"] = key
     encoded = processor.encode(row, settings)
-    assert encoded["labels"][1] == 1
+    assert encoded["labels"] == row["branch"]["final_correctness"]
     assert processor._retain_example({**row, "oracle": True}, settings)
 
 
@@ -273,7 +294,7 @@ def test_root_oracle_runs_and_round_robin(prepared_inputs: PreparationConfig) ->
     for row in roots:
         assert row["remaining_blocks"] == 2
         assert row["solution_index"] == row["branch"]["seed"]
-        assert row["branch"]["outcomes"] == [1, row["branch"]["seed"]]
+        assert row["branch"]["final_correctness"] == row["branch"]["seed"]
         assert row["reference_solution"] == ("Alternate proof." if row["solution_index"] else "The answer is one.")
         assert row["messages"][-1]["content"] == f"Root {row['branch']['seed']} block 1"
 
@@ -306,7 +327,7 @@ def test_duplicate_branch_identity_rejected(prepared_inputs: PreparationConfig) 
     copied = source.parent / "copy"
     copied.mkdir()
     (copied / "meta.json").write_bytes((source / "meta.json").read_bytes())
-    with pytest.raises(ValueError, match="duplicate branch"):
+    with pytest.raises(ValueError, match="duplicate.*trajectory"):
         DatasetProcessor(prepared_inputs).run()
 
 
@@ -318,7 +339,7 @@ def test_input_checkpoint_excludes_later_phase_and_text(prepared_inputs: Prepara
         assert all("FINAL FUTURE" not in message["content"] for message in row["messages"])
         if row["fork"] == 1:
             assert row["phase"] == "critique" and row["response_finished"] is True
-            assert row["branch"]["outcomes"] == [row["branch"]["seed"]]
+            assert row["branch"]["final_correctness"] == row["branch"]["seed"]
         assert row["split"] == "test"
 
 
@@ -342,4 +363,26 @@ def test_eight_branches_produce_eight_inputs_per_condition(prepared_inputs: Prep
         assert len(examples) == 8
         assert len({row["messages"][-1]["content"] for row in examples}) == 8
         for row in examples:
-            assert encoder.encode(row, {"max_length": 256})["labels"] == [row["branch"]["seed"] % 2, 1]
+            assert encoder.encode(row, {"max_length": 256})["labels"] == row["branch"]["seed"] % 2
+
+
+def test_duplicate_root_run_rejected(prepared_inputs: PreparationConfig) -> None:
+    """Copied root runs must not silently double one seed's training weight."""
+    original = next(path for path in prepared_inputs.outputs_directory.rglob("meta.json")
+                    if json.loads(path.read_text())["experiment"] == "unaided")
+    copied = original.parent.with_name("copied_seed")
+    copied.mkdir()
+    for path in original.parent.iterdir():
+        (copied / path.name).write_bytes(path.read_bytes())
+    with pytest.raises(ValueError, match="duplicate.*trajectory"):
+        DatasetProcessor(prepared_inputs).run()
+
+
+def test_checkpoint_ahead_of_saved_progress_rejected(prepared_inputs: PreparationConfig) -> None:
+    """Do not accept a checkpoint beyond the conversation's recorded token progress."""
+    path = next(prepared_inputs.outputs_directory.rglob("branch_0/conversation.json.zst"))
+    state = json.loads(zstandard.decompress(path.read_bytes()))
+    state["output_tokens"] = 0
+    path.write_bytes(zstandard.compress(json.dumps(state).encode()))
+    with pytest.raises(ValueError, match="checkpoint.*progress"):
+        DatasetProcessor(prepared_inputs).run()

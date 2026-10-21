@@ -11,7 +11,7 @@ from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoTokenizer
 from transformers.utils.logging import disable_progress_bar
 
-from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, MAX_BLOCKS, META_FILENAME, SUPPORTED_MODELS
+from discovery_execution.harness.constants import AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, MAX_BLOCKS, META_FILENAME, SUPPORTED_MODELS
 from critic_only.constants import (
     DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
     DEFAULT_SEED, DEFAULT_VALIDATION_FRACTION,
@@ -37,7 +37,7 @@ def download_outputs(repository: str, revision: str, solver: str, horizon: int) 
         fork = select_input_fork(metadata, horizon)
         if fork is None:
             continue
-        needed = [path.parent / "audit.json", path.parent / CHECKPOINT_FILENAME.format(k=fork + 1),
+        needed = [path.parent / AUDIT_FILENAME, path.parent / CHECKPOINT_FILENAME.format(k=fork + 1),
                   path.parent / CONVERSATION_FILENAME]
         if fork:
             model_root = root / metadata["competition"] / str(metadata["year"]) / solver
