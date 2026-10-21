@@ -21,7 +21,7 @@ from critic_only.constants import (
     DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
 )
-from critic_only.data.processor import select_ordinary_examples
+from critic_only.data.processor import select_unaided_examples
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.eval.metrics import compute_metrics
 from critic_only.models.loader import create_critic_from_pretrained
@@ -104,13 +104,13 @@ def main() -> None:
     dataset = cast(DatasetDict, load_from_disk(str(args.data)))
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
-    if args.variant != "ordinary" and cached["oracle_supervision_fraction"] == 0:
-        raise ValueError("oracle-supervised variants require nonzero oracle coverage")
-    if args.variant != "ordinary" and not any(dataset["train"]["oracle"]):
+    if args.variant != "ppo-critic" and cached["oracle_supervision_fraction"] == 0:
+        raise ValueError("PPOOracleCritic and DECritic require nonzero oracle coverage")
+    if args.variant != "ppo-critic" and not any(dataset["train"]["oracle"]):
         raise ValueError("no training prefix has oracle outcomes under this coverage selection")
-    if args.variant == "ordinary":
-        dataset["train"] = select_ordinary_examples(dataset["train"])
-    dataset["validation"] = select_ordinary_examples(dataset["validation"])
+    if args.variant == "ppo-critic":
+        dataset["train"] = select_unaided_examples(dataset["train"])
+    dataset["validation"] = select_unaided_examples(dataset["validation"])
     training = training_arguments(args)
     record = validate_training_run(args, manifest_bytes, settings, training.world_size) if training.process_index == 0 else None
     model_config = AutoConfig.from_pretrained(settings.model, revision=settings.revision)

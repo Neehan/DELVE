@@ -85,7 +85,7 @@ class BaseCritic(nn.Module, ABC):
 
         Divide by the number of observed branches for this history, giving each history equal weight regardless of branch count. Only terminal outcomes contribute; earlier checkpoints are not auxiliary targets.
 
-        Oracle examples receive oracle_weight; ordinary examples receive weight one. Ordinary-only training excludes oracle examples before batching.
+        Oracle examples receive oracle_weight; unaided examples receive weight one. PPOCritic training excludes oracle examples before batching.
 
         Returns:
             Losses [examples], without batch averaging. BaseTrainer averages the paired reference/no-reference losses for each example, then averages examples. References and generated oracle sketches are distinct inputs.

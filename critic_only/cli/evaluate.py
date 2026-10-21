@@ -17,7 +17,7 @@ from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE, MANIFEST_FILENAME, SPLITS, TOKENIZED_DIRECTORY
 from critic_only.data.tokenizer import PrefixTokenizer
-from critic_only.data.processor import select_ordinary_examples
+from critic_only.data.processor import select_unaided_examples
 from critic_only.eval.metrics import evaluation_report
 from critic_only.models.loader import create_critic_from_pretrained
 from critic_only.models.models import CriticConfig
@@ -67,7 +67,7 @@ def main() -> None:
         raise ValueError("evaluation cache uses a different model/tokenizer revision")
     if cache["preparation"]["settings"]["horizon"] != settings.horizon:
         raise ValueError("evaluation horizon differs from training")
-    dataset = select_ordinary_examples(cast(DatasetDict, load_from_disk(str(args.data)))[args.split])
+    dataset = select_unaided_examples(cast(DatasetDict, load_from_disk(str(args.data)))[args.split])
     model = create_critic_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
     model.load_from_weights(args.checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")

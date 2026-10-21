@@ -24,11 +24,11 @@ def selection_fraction(key: str, seed: int) -> float:
     return int.from_bytes(digest) / HASH_SCALE
 
 
-def select_ordinary_examples(dataset: Dataset) -> Dataset:
-    """Select ordinary histories for the baseline's training and all primary evaluations."""
+def select_unaided_examples(dataset: Dataset) -> Dataset:
+    """Select unaided histories for the baseline's training and all primary evaluations."""
     selected = dataset.select([index for index, oracle in enumerate(dataset["oracle"]) if not oracle])
     if not len(selected):
-        raise ValueError("no ordinary histories available")
+        raise ValueError("no unaided histories available")
     return selected
 
 

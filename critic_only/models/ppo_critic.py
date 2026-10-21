@@ -12,7 +12,7 @@ class PPOCritic(BaseCritic):
     """Predict success from the supplied history; PPOOracleCritic shares this same head."""
 
     def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
-        """Use identical head capacity for the ordinary and oracle-supervised baselines."""
+        """Use identical head capacity for the PPOCritic and PPOOracleCritic baselines."""
         super().__init__(model, hidden_size, settings)
         self.head = nn.Linear(hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
 

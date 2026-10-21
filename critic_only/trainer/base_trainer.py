@@ -39,7 +39,7 @@ class BaseTrainer(Trainer):
             temporary.replace(directory / TRAINER_STATE_NAME)
 
     def compute_loss(self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        """Combine reference-conditioned and ordinary input losses into one training objective.
+        """Combine reference-conditioned and unprivileged input losses into one training objective.
 
         The batch contains B input views without reference solutions followed by P privileged views that include a reference solution. labels contains counts for the B prefixes; privileged_indices maps the P extra views to those same labels. A single model forward processes all B+P views.
 
