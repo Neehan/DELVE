@@ -35,4 +35,5 @@ class DECritic(BaseCritic):
         terminal_execution = execution_logits.gather(-1, (remaining_blocks - 1).unsqueeze(-1)).squeeze(-1)
         prior = discovered * terminal_execution.sigmoid() + (1 - discovered) * acquired
         prior = prior.clamp(PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
+        # Oracle histories use only epsilon's logit; unaided histories use the combined discovery-execution logit.
         return torch.where(oracle, terminal_execution, torch.logit(prior))
