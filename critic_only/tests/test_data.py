@@ -2,13 +2,14 @@
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import zstandard
 from datasets import Dataset, load_from_disk
 from transformers import PreTrainedTokenizerFast
 
-from critic_only.constants import MANIFEST_FILENAME, REFERENCE_PROMPT
+from critic_only.constants import CRITIC_PROMPT_PATH, MANIFEST_FILENAME, REFERENCE_PROMPT_PATH
 from critic_only.data.models import PreparationConfig
 from critic_only.data.processor import DatasetProcessor, selection_fraction
 from critic_only.data.tokenizer import PrefixTokenizer
@@ -23,14 +24,15 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     assert row["messages"][-1]["content"] == "Thinking"
     assert len(rows) == 2 and len(row["branches"]) == 2
     assert row["remaining_blocks"] == 2 and "horizon" not in row
-    settings = {"backbone": "tiny", "revision": "local", "max_length": 256,
-                "oracle_supervision_fraction": 0, "branch_limit": None, "seed": 42}
+    settings = {"model": "tiny", "revision": "local", "max_length": 256,
+                "oracle_supervision_fraction": 0, "seed": 42}
     processor = PrefixTokenizer(tokenizer)
     encoded = processor.encode(row, settings)
-    assert not {"remaining_blocks", "fork", "attention_mask", "horizon"} & encoded.keys()
+    assert not {"fork", "attention_mask", "horizon"} & encoded.keys()
     assert len(encoded["privileged_input_ids"]) > len(encoded["input_ids"])
     assert "reference_solution" not in encoded
-    assert encoded["labels"] == [[2, 2], [1, 2]]
+    assert encoded["labels"] == [1, 2]
+    assert encoded["remaining_blocks"] == 2
     row["split"] = "train"
     assert processor._retain_example(row, settings)
     oracle_row = {**dict(rows[1]), "split": "train"}
@@ -42,6 +44,17 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     assert json.loads((destination / MANIFEST_FILENAME).read_text())["input_sha256"]
     with pytest.raises(FileExistsError):
         processor.run(prepared_inputs.destination, destination, settings)
+
+
+def test_branch_snapshots_are_read_once(prepared_inputs: PreparationConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prefix validation and oracle extraction share each checkpoint read and retain matching histories."""
+    processor = DatasetProcessor(prepared_inputs)
+    read = Mock(wraps=processor._read_json)
+    monkeypatch.setattr(processor, "_read_json", read)
+    processor.run()
+    paths = [call.args[0] for call in read.call_args_list]
+    for snapshot in prepared_inputs.outputs_directory.rglob("checkpoint_2x.json.zst"):
+        assert paths.count(snapshot) == 1
 
 
 def test_oracle_history_contains_only_saved_intervention(prepared_inputs: PreparationConfig,
@@ -66,13 +79,13 @@ def test_oracle_history_contains_only_saved_intervention(prepared_inputs: Prepar
     assert oracle["messages"] == ordinary["messages"] + [{"role": "user", "content": injection}]
     assert oracle["phase"] == "solve" and oracle["response_finished"] is False
     assert all("FUTURE ANSWER" not in message["content"] for row in (ordinary, oracle) for message in row["messages"])
-    settings = {"max_length": 256, "oracle_supervision_fraction": 1, "branch_limit": None, "seed": 1234}
+    settings = {"max_length": 256, "oracle_supervision_fraction": 1, "seed": 1234}
     processor = PrefixTokenizer(tokenizer)
     plain, injected = processor.encode(dict(ordinary), settings), processor.encode(dict(oracle), settings)
     assert not plain["oracle"] and injected["oracle"]
     assert len(injected["input_ids"]) > len(plain["input_ids"])
-    assert plain["labels"] == [[2, 2], [1, 2]]
-    assert injected["labels"] == [[0, 2], [0, 2]]
+    assert plain["labels"] == [1, 2]
+    assert injected["labels"] == [0, 2]
 
 
 def test_different_oracle_messages_cannot_share_labels(prepared_inputs: PreparationConfig) -> None:
@@ -130,27 +143,27 @@ def test_no_truncation(prepared_inputs: PreparationConfig, tokenizer: PreTrained
     row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
     processor = PrefixTokenizer(tokenizer)
     settings = {"max_length": 1, "oracle_supervision_fraction": 1,
-                "branch_limit": None, "seed": 42}
+                "seed": 42}
     with pytest.raises(ValueError, match="truncation"):
         processor.encode(row, settings)
 
 
-def test_training_branch_limit_and_independent_coverage(prepared_inputs: PreparationConfig,
+def test_all_branches_and_independent_oracle_selection(prepared_inputs: PreparationConfig,
                                                        tokenizer: PreTrainedTokenizerFast) -> None:
-    """Oracle coverage must use a different hash stream from the problem split; evaluation keeps all branches."""
+    """Keep all branches in train and evaluation; select oracle problems independently of the split."""
     DatasetProcessor(prepared_inputs).run()
     row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
     processor = PrefixTokenizer(tokenizer)
     settings = {"max_length": 256, "oracle_supervision_fraction": 0.25,
-                "branch_limit": 1, "seed": 42}
-    assert processor.encode(row, settings)["labels"][0][1] == 2
+                "seed": 42}
+    assert processor.encode(row, settings)["labels"][1] == 2
     row["split"] = "train"
     key = next(f"problem-{i}" for i in range(1000)
                if selection_fraction(f"problem-{i}", 42) > 0.5
                and selection_fraction(f"oracle:problem-{i}", 42) < 0.25)
     row["problem_key"] = key
     encoded = processor.encode(row, settings)
-    assert encoded["labels"][0][1] == 1
+    assert encoded["labels"][1] == 2
     assert processor._retain_example({**row, "oracle": True}, settings)
 
 
@@ -198,10 +211,9 @@ def test_optional_reference_encoding(prepared_inputs: PreparationConfig, tokeniz
     DatasetProcessor(prepared_inputs).run()
     row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
     processor = PrefixTokenizer(tokenizer)
-    settings = {"max_length": 256, "oracle_supervision_fraction": 1, "branch_limit": None, "seed": 1234}
+    settings = {"max_length": 256, "oracle_supervision_fraction": 1, "seed": 1234}
     paired = processor.encode(row, settings)
-    assert paired["privileged_input_ids"][-len(tokenizer.encode(REFERENCE_PROMPT.format(solution=row["reference_solution"]))):] == (
-        tokenizer.encode(REFERENCE_PROMPT.format(solution=row["reference_solution"])))
+    assert len(paired["privileged_input_ids"]) > len(paired["input_ids"])
     with pytest.raises(ValueError, match="truncation"):
         processor.encode(row, {**settings, "max_length": len(paired["input_ids"])})
     row["reference_solution"] = None
@@ -214,3 +226,32 @@ def test_optional_reference_encoding(prepared_inputs: PreparationConfig, tokeniz
     (source / MANIFEST_FILENAME).write_text((prepared_inputs.destination / MANIFEST_FILENAME).read_text())
     processor.run(source, tmp_path / "cache", settings)
     assert load_from_disk(str(tmp_path / "cache"))["test"][0]["privileged_input_ids"] is None
+
+
+def test_chat_prompt_preserves_history_and_separates_reference(prepared_inputs: PreparationConfig,
+                                                               tokenizer: PreTrainedTokenizerFast,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unfinished reasoning and sketches verbatim, with references restricted to the privileged view."""
+    DatasetProcessor(prepared_inputs).run()
+    row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[1])
+    row["messages"][1]["content"] = "<think>unfinished reasoning with {symbols}"
+    template = Mock(wraps=tokenizer.apply_chat_template)
+    monkeypatch.setattr(tokenizer, "apply_chat_template", template)
+    processor = PrefixTokenizer(tokenizer)
+    assert processor.system_prompt == CRITIC_PROMPT_PATH.read_text().strip()
+    processor.encode(row, {"max_length": 512})
+    plain, privileged = [call.args[0] for call in template.call_args_list]
+    assert [message["role"] for message in plain] == ["system", "user"]
+    assert plain[1] == privileged[1]
+    assert "Remaining budget: 2 blocks" in plain[0]["content"]
+    for message in row["messages"]:
+        assert message["content"] in plain[1]["content"]
+    assert row["reference_solution"] not in plain[1]["content"]
+    assert row["reference_solution"] not in plain[0]["content"]
+    assert "calibrate" not in plain[0]["content"]
+    reference = REFERENCE_PROMPT_PATH.read_text().strip().format(solution=row["reference_solution"])
+    assert privileged[0]["content"] == plain[0]["content"] + "\n\n" + reference
+    assert "not available to the solver" in privileged[0]["content"]
+    for call in template.call_args_list:
+        assert call.kwargs == {"tokenize": True, "add_generation_prompt": False,
+                               "truncation": False, "return_dict": False}

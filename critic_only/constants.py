@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-DEFAULT_TEST_YEAR = 2026
+TEST_YEAR = 2026
 DEFAULT_VALIDATION_FRACTION = 0.2
 DEFAULT_SEED = 1234
 DEFAULT_HORIZON = 5
@@ -14,7 +14,6 @@ DEFAULT_BATCH_SIZE = 1
 DEFAULT_ACCUMULATION_STEPS = 8
 DEFAULT_MAX_LENGTH = 49_152
 DEFAULT_ORACLE_SUPERVISION_FRACTION = 1.0
-DEFAULT_BRANCH_LIMIT = None
 DEFAULT_ORACLE_WEIGHT = 1.0
 DEFAULT_ATTENTION = "sdpa"
 PAIRED_INPUT_WEIGHT = 0.5
@@ -30,7 +29,9 @@ CONDITIONS = ("continue", "continue-oracle")
 # Final count axis: [successful branches, total branches].
 SUCCESS_COUNT_INDEX = 0
 TRIAL_COUNT_INDEX = 1
+OUTCOME_COUNT_FIELDS = 2
 DE_STATE_FIELDS = 2
+VALUE_OUTPUT_SIZE = 1
 PROCESSING_DIRECTORY = Path("data/critic_only")
 PREPARED_SUBDIRECTORY = "prepared"
 TOKENIZED_SUBDIRECTORY = "tokenized"
@@ -40,12 +41,5 @@ MODEL_FILENAME = "critic.safetensors"
 CONFIG_FILENAME = "critic.json"
 MANIFEST_FILENAME = "manifest.json"
 TRAINING_ARGS_FILENAME = "training_args.json"
-PROMPT = (
-    "Estimate final-answer correctness after each additional block of self-refinement. "
-    "One block contains {block_tokens} generated tokens. The solver follows solve, critique, "
-    "and revise instructions without correctness feedback. It may revise a correct answer incorrectly. "
-    "Remaining budget: {remaining_blocks} blocks.\n\n"
-    "Current phase: {phase}. The last response ended naturally: {response_finished}.\n\n"
-    "Saved conversation:\n{conversation}"
-)
-REFERENCE_PROMPT = "\n\nVerified reference solution (critic only):\n{solution}"
+CRITIC_PROMPT_PATH = Path(__file__).parent / "prompts" / "critic.md"
+REFERENCE_PROMPT_PATH = CRITIC_PROMPT_PATH.parent / "reference.md"

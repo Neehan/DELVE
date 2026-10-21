@@ -11,7 +11,7 @@ import torch
 from datasets import DatasetDict, load_from_disk
 from datasets.utils import disable_progress_bars
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, TrainingArguments, set_seed
+from transformers import AutoConfig, AutoTokenizer, TrainingArguments, set_seed
 
 from transformers.utils.logging import disable_progress_bar
 
@@ -68,8 +68,8 @@ def training_arguments(args: argparse.Namespace) -> TrainingArguments:
                              train_sampling_strategy="group_by_length", ddp_find_unused_parameters=False)
 
 
-def bind_training_run(args: argparse.Namespace, manifest: bytes, settings: CriticConfig, world_size: int) -> None:
-    """Reject accidental overwrites and changed data/settings when explicitly resuming."""
+def validate_training_run(args: argparse.Namespace, manifest: bytes, settings: CriticConfig, world_size: int) -> dict[str, Any]:
+    """Check output ownership and resume settings before loading weights; return the record to save later."""
     options = {key: value for key, value in vars(args).items() if key not in {"resume", "output", "data"}}
     options["data"] = str(args.data)
     options["world_size"] = world_size
@@ -78,15 +78,15 @@ def bind_training_run(args: argparse.Namespace, manifest: bytes, settings: Criti
     record["data"] = {"tokenization": cache["settings"], "preparation": cache["preparation"]["settings"]}
     path = args.output / "training.json"
     if args.resume is not None:
+        if not args.resume.is_dir():
+            raise FileNotFoundError(args.resume)
         if json.loads(path.read_text()) != record:
             raise ValueError("saved training settings or cached data differ")
         if args.resume.resolve().parent != args.output.resolve():
             raise ValueError("resume checkpoint must belong to this output directory")
     elif args.output.exists() and any(args.output.iterdir()):
         raise FileExistsError(f"output is not empty; use --resume or a new directory: {args.output}")
-    else:
-        args.output.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2) + "\n")
+    return record
 
 
 def main() -> None:
@@ -99,7 +99,7 @@ def main() -> None:
     manifest_bytes = (args.data / MANIFEST_FILENAME).read_bytes()
     manifest = json.loads(manifest_bytes)
     cached = manifest["settings"]
-    settings = CriticConfig(backbone=cached["backbone"], revision=cached["revision"], variant=args.variant,
+    settings = CriticConfig(model=cached["model"], revision=cached["revision"], variant=args.variant,
                             horizon=manifest["preparation"]["settings"]["horizon"], lora_rank=args.rank,
                             lora_alpha=args.lora_alpha, oracle_weight=args.oracle_weight,
                             attention=args.attention)
@@ -113,16 +113,20 @@ def main() -> None:
     if args.variant == "ordinary":
         dataset["train"] = select_ordinary_examples(dataset["train"])
     dataset["validation"] = select_ordinary_examples(dataset["validation"])
+    training = training_arguments(args)
+    record = validate_training_run(args, manifest_bytes, settings, training.world_size) if training.process_index == 0 else None
+    model_config = AutoConfig.from_pretrained(settings.model, revision=settings.revision)
+    if cached["max_length"] > model_config.get_text_config().max_position_embeddings:
+        raise ValueError("cached maximum length exceeds the critic model's context limit")
     tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
     model = create_critic_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
-    if cached["max_length"] > cast(Any, model.backbone).config.max_position_embeddings:
-        raise ValueError("cached maximum length exceeds the critic backbone's context limit")
-    trainer = BaseTrainer(model=model, args=training_arguments(args), data_collator=PrefixTokenizer(tokenizer).pad_batch,
+    trainer = BaseTrainer(model=model, args=training, data_collator=PrefixTokenizer(tokenizer).pad_batch,
                           train_dataset=dataset["train"], eval_dataset=dataset["validation"],
                           compute_metrics=partial(compute_metrics, problem_keys=list(dataset["validation"]["problem_key"])))
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():
-            bind_training_run(args, manifest_bytes, settings, trainer.args.world_size)
+            args.output.mkdir(parents=True, exist_ok=True)
+            (args.output / "training.json").write_text(json.dumps(record, indent=2) + "\n")
     trainer.train(resume_from_checkpoint=str(args.resume) if args.resume else None)
     trainer.save_model(str(args.output / "best"))
     trainer.save_state()

@@ -15,6 +15,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
+from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
 from critic_only.data.models import PreparationConfig
 from critic_only.models.models import CriticConfig
 
@@ -30,13 +31,14 @@ def tokenizer() -> PreTrainedTokenizerFast:
     """Use a deterministic local tokenizer with distinct padding and unknown tokens."""
     backend = Tokenizer(WordLevel({"[PAD]": 0, "[UNK]": 1, "problem": 2, "answer": 3}, unk_token="[UNK]"))
     backend.pre_tokenizer = Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]", padding_side="right")
+    return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]", padding_side="right",
+                                   chat_template=(TEMPLATES_DIRECTORY / "qwen3.jinja").read_text())
 
 
 @pytest.fixture
 def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
-    """Save a real tiny Qwen3 backbone so PEFT construction and checkpointing use actual APIs."""
-    directory = tmp_path / "backbone"
+    """Save a real tiny Qwen3 model so PEFT construction and checkpointing use actual APIs."""
+    directory = tmp_path / "model"
     torch.manual_seed(7)
     config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
                          num_attention_heads=2, num_key_value_heads=2, head_dim=8, max_position_embeddings=256)
@@ -44,7 +46,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
 
     def create(variant: str) -> CriticConfig:
         """Keep all settings except the prediction variant matched."""
-        return CriticConfig.model_validate(dict(backbone=str(directory), revision="local", variant=variant, horizon=3,
+        return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
                                                 lora_rank=2, lora_alpha=4,
                                                 oracle_weight=1, attention="eager"))
 
@@ -90,7 +92,7 @@ def prepared_inputs(tmp_path: Path) -> PreparationConfig:
                          "checkpoints": {"2x": {"correctness": {"score": 1}}, "3x": {"correctness": {"score": seed}}}}
                 (branch / "audit.json").write_text(json.dumps(audit))
     return PreparationConfig(outputs_directory=root, datasets_directory=references.parent, destination=tmp_path / "prepared",
-                             solver_model="tiny", horizon=3, test_year=2026, validation_fraction=0.2,
+                             solver_model="tiny", horizon=3, validation_fraction=0.2,
                              split_seed=42, source_revision="fixture")
 
 
@@ -99,7 +101,7 @@ def training_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "labels": [[1, 2], [0, 2]]},
+             "oracle": False, "remaining_blocks": 2, "labels": [0, 2]},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "labels": [[0, 2], [1, 2]]}]
+             "oracle": False, "remaining_blocks": 1, "labels": [1, 2]}]

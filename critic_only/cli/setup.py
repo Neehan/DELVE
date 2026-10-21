@@ -11,10 +11,10 @@ from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoTokenizer
 from transformers.utils.logging import disable_progress_bar
 
-from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, META_FILENAME, SUPPORTED_MODELS
+from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, MAX_BLOCKS, META_FILENAME, SUPPORTED_MODELS
 from critic_only.constants import (
-    CONDITIONS, DEFAULT_BRANCH_LIMIT, DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
-    DEFAULT_SEED, DEFAULT_TEST_YEAR, DEFAULT_VALIDATION_FRACTION,
+    CONDITIONS, DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
+    DEFAULT_SEED, DEFAULT_VALIDATION_FRACTION,
     PREPARED_SUBDIRECTORY, PROCESSING_DIRECTORY, TOKENIZED_SUBDIRECTORY,
 )
 from critic_only.data.models import PreparationConfig
@@ -52,24 +52,29 @@ def parse_arguments() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--outputs-directory", type=Path)
     source.add_argument("--outputs-repo")
-    parser.add_argument("--revision", required=True, help="HF revision, or a descriptive local collection revision")
+    parser.add_argument("--revision", help="required HF outputs revision; omit for local files")
     parser.add_argument("--datasets-directory", type=Path, default=DATASETS_DIRECTORY)
     parser.add_argument("--destination", type=Path, default=PROCESSING_DIRECTORY)
     parser.add_argument("--solver-model", choices=SUPPORTED_MODELS, required=True)
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
-    parser.add_argument("--test-year", type=int, default=DEFAULT_TEST_YEAR)
     parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--backbone", required=True)
-    parser.add_argument("--backbone-revision", required=True)
     parser.add_argument("--max-length", type=int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--oracle-supervision-fraction", type=float, default=DEFAULT_ORACLE_SUPERVISION_FRACTION)
-    parser.add_argument("--branch-limit", type=int, default=DEFAULT_BRANCH_LIMIT, help="training branches per prefix and condition")
     args = parser.parse_args()
     if args.max_length < 1 or not 0 <= args.oracle_supervision_fraction <= 1:
         parser.error("max-length must be positive and oracle-supervision-fraction must be in [0, 1]")
-    if args.branch_limit is not None and args.branch_limit < 1:
-        parser.error("branch-limit must be positive")
+    if not 2 <= args.horizon <= MAX_BLOCKS or not 0 < args.validation_fraction < 1 or args.seed < 0:
+        parser.error(f"horizon must be in [2, {MAX_BLOCKS}], validation-fraction in (0, 1), and seed nonnegative")
+    if args.outputs_repo and not args.revision:
+        parser.error("--outputs-repo requires --revision")
+    if args.outputs_directory is not None:
+        if args.revision is not None:
+            parser.error("--revision applies only to --outputs-repo")
+        if not args.outputs_directory.is_dir():
+            parser.error(f"outputs directory does not exist: {args.outputs_directory}")
+    if not args.datasets_directory.is_dir():
+        parser.error(f"datasets directory does not exist: {args.datasets_directory}")
     return args
 
 
@@ -81,25 +86,26 @@ def main() -> None:
     args = parse_arguments()
     if args.destination.exists():
         raise FileExistsError(args.destination)
-    revision = HfApi().model_info(args.backbone, revision=args.backbone_revision).sha
-    if revision is None:
-        raise ValueError("HF backbone revision could not be resolved")
-    tokenizer = PrefixTokenizer(AutoTokenizer.from_pretrained(args.backbone, revision=revision, padding_side="right"))
-    settings = {"backbone": args.backbone, "revision": revision, "max_length": args.max_length,
-                "oracle_supervision_fraction": args.oracle_supervision_fraction,
-                "branch_limit": args.branch_limit, "seed": args.seed}
-    directory, revision = args.outputs_directory, args.revision
+    directory, source_revision = args.outputs_directory, None
     print("Processing saved trajectories and audits.", flush=True)
     if args.outputs_repo:
-        directory, revision = download_outputs(args.outputs_repo, revision, args.solver_model, args.horizon)
+        directory, revision = download_outputs(args.outputs_repo, args.revision, args.solver_model, args.horizon)
+        source_revision = f"{args.outputs_repo}@{revision}"
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=args.destination.parent) as temporary:
         staging = Path(temporary)
         config = PreparationConfig(outputs_directory=directory, datasets_directory=args.datasets_directory,
                                    destination=staging / PREPARED_SUBDIRECTORY, solver_model=args.solver_model,
-                                   horizon=args.horizon, test_year=args.test_year, validation_fraction=args.validation_fraction,
-                                   split_seed=args.seed, source_revision=f"{args.outputs_repo or 'local'}@{revision}")
+                                   horizon=args.horizon, validation_fraction=args.validation_fraction,
+                                   split_seed=args.seed, source_revision=source_revision)
         DatasetProcessor(config).run()
+        model = SUPPORTED_MODELS[args.solver_model]
+        revision = HfApi().model_info(model).sha
+        if revision is None:
+            raise ValueError("HF model revision could not be resolved")
+        tokenizer = PrefixTokenizer(AutoTokenizer.from_pretrained(model, revision=revision, padding_side="right"))
+        settings = {"model": model, "revision": revision, "max_length": args.max_length,
+                    "oracle_supervision_fraction": args.oracle_supervision_fraction, "seed": args.seed}
         print("Tokenizing critic inputs and saving labels.", flush=True)
         tokenizer.run(config.destination, staging / TOKENIZED_SUBDIRECTORY, settings)
         staging.rename(args.destination)

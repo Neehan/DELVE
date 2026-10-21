@@ -8,10 +8,10 @@ from discovery_execution.harness.constants import MAX_BLOCKS
 
 
 class CriticConfig(BaseModel):
-    """Pin the backbone and adapter capacity independently of the prediction variant."""
+    """Pin the model and adapter capacity independently of the prediction variant."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    backbone: str
+    model: str
     revision: str
     variant: Literal["ordinary", "oracle-supervised", "de"]
     horizon: int = Field(ge=2, le=MAX_BLOCKS)

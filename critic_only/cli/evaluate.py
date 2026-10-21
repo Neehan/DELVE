@@ -40,7 +40,8 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     privileged = [probability.tolist() if present else None
                   for probability, present in zip(expit(privileged_logits), mask)]
     Dataset.from_dict({"prefix_id": dataset["prefix_id"], "problem_key": keys,
-                       "probabilities": expit(logits).tolist(), "privileged_probabilities": privileged,
+                       "remaining_blocks": dataset["remaining_blocks"],
+                       "probability": expit(logits).tolist(), "privileged_probability": privileged,
                        "counts": labels.tolist()}).to_parquet(str(args.destination / "predictions.parquet"))
 
 
@@ -56,12 +57,14 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
+    if args.batch_size <= 0:
+        parser.error("batch-size must be positive")
     if args.destination.exists():
         raise FileExistsError(args.destination)
     settings = CriticConfig.model_validate_json((args.checkpoint / CONFIG_FILENAME).read_text())
     cache = json.loads((args.data / MANIFEST_FILENAME).read_text())
-    if (cache["settings"]["backbone"], cache["settings"]["revision"]) != (settings.backbone, settings.revision):
-        raise ValueError("evaluation cache uses a different backbone/tokenizer revision")
+    if (cache["settings"]["model"], cache["settings"]["revision"]) != (settings.model, settings.revision):
+        raise ValueError("evaluation cache uses a different model/tokenizer revision")
     if cache["preparation"]["settings"]["horizon"] != settings.horizon:
         raise ValueError("evaluation horizon differs from training")
     dataset = select_ordinary_examples(cast(DatasetDict, load_from_disk(str(args.data)))[args.split])

@@ -13,7 +13,7 @@ from transformers import EvalPrediction, PreTrainedTokenizerFast
 
 from critic_only.constants import MODEL_FILENAME, PROBABILITY_EPSILON
 from critic_only.data.tokenizer import PrefixTokenizer
-from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores, terminal_scores
+from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
 from critic_only.models.ordinary import Ordinary
 from critic_only.models.loader import create_critic_from_pretrained
@@ -28,14 +28,15 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
     assert type(model).__name__ == {"ordinary": "Ordinary", "oracle-supervised": "OracleSupervised", "de": "DECritic"}[variant]
     batch = PrefixTokenizer(tokenizer).pad_batch(training_rows)
     counts = batch.pop("labels")
-    batch = {key: batch[key][:len(counts)] for key in ("input_ids", "attention_mask", "oracle")}
+    batch = {key: batch[key][:len(counts)] for key in ("input_ids", "attention_mask", "oracle", "remaining_blocks")}
     model.train()
     prediction = model(**batch)
+    assert prediction.shape == (len(counts),)
     loss = model.loss(prediction, counts, batch["oracle"]).mean()
     loss.backward()
     assert torch.isfinite(loss)
     assert any("lora_" in name and value.grad is not None for name, value in model.named_parameters())
-    assert all(not value.requires_grad for name, value in model.backbone.named_parameters() if "lora_" not in name)
+    assert all(not value.requires_grad for name, value in model.model.named_parameters() if "lora_" not in name)
     directory = tmp_path / "checkpoint"
     model.eval()
     expected = model(**batch).detach()
@@ -44,7 +45,7 @@ def test_lora_backward_and_restore(variant: str, critic_settings: Callable[[str]
     restored.load_from_weights(directory)
     restored.eval()
     torch.testing.assert_close(restored(**batch), expected)
-    assert (directory / "critic.safetensors").stat().st_size < (Path(model.settings.backbone) / "model.safetensors").stat().st_size
+    assert (directory / "critic.safetensors").stat().st_size < (Path(model.settings.model) / "model.safetensors").stat().st_size
 
 
 def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
@@ -54,7 +55,7 @@ def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str
     directory = tmp_path / "checkpoint"
     model.save(directory)
     weights = {name: tensor + 1 for name, tensor in load_file(str(directory / MODEL_FILENAME)).items()}
-    weights["head.bias"] = torch.ones(1)
+    weights["head.bias"] = torch.ones(2)
     save_file(weights, str(directory / MODEL_FILENAME))
     with pytest.raises(ValueError, match="shape differs for head.bias"):
         model.load_from_weights(directory)
@@ -65,11 +66,11 @@ def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str
 def test_count_loss_matches_binary_bce(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Aggregated labels use the same likelihood as their individual Bernoulli observations."""
     model = Ordinary.create_from_pretrained(critic_settings("ordinary"), torch.float32)
-    logits = torch.tensor([[0.7, -0.3]], requires_grad=True)
-    counts = torch.tensor([[[2, 3], [1, 2]]]).float()
+    logits = torch.tensor([0.7], requires_grad=True)
+    counts = torch.tensor([[2, 3]]).float()
     loss = model.loss(logits, counts, torch.tensor([False])).mean()
     expected = torch.nn.functional.binary_cross_entropy_with_logits(
-        torch.tensor([0.7, 0.7, 0.7, -0.3, -0.3]), torch.tensor([1., 1., 0., 1., 0.]))
+        torch.tensor([0.7, 0.7, 0.7]), torch.tensor([1., 1., 0.]))
     torch.testing.assert_close(loss, expected)
     loss.backward()
     assert logits.grad is not None
@@ -84,17 +85,17 @@ def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) ->
         model.acquisition.bias.fill_(30)
         model.execution.weight.zero_()
         model.execution.bias.copy_(torch.tensor([2.0, -2.0]))
-    output = model.predict(torch.zeros(1, model.hidden_size), torch.tensor([False]))
-    torch.testing.assert_close(output, torch.tensor([[2.0, -2.0]]))
-    assert output[0, 1] < output[0, 0]
+    output = model.predict(torch.zeros(2, model.hidden_size), torch.tensor([False, False]), torch.tensor([1, 2]))
+    torch.testing.assert_close(output, torch.tensor([2.0, -2.0]))
+    assert output[1] < output[0]
 
 
 def test_direct_head_is_shared_across_history_types(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Condition metadata must not select a separate direct-model head; the actual history provides context."""
     model = create_critic_from_pretrained(critic_settings("oracle-supervised"), torch.float32)
     hidden = torch.randn(1, model.hidden_size).expand(2, -1)
-    prediction = model.predict(hidden, torch.tensor([False, True]))
-    assert prediction.shape == (2, model.horizons)
+    prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([1, 1]))
+    assert prediction.shape == (2,)
     torch.testing.assert_close(prediction[0], prediction[1])
 
 
@@ -103,9 +104,9 @@ def test_oracle_de_uses_execution_head(critic_settings: Callable[[str], CriticCo
     model = DECritic.create_from_pretrained(critic_settings("de"), torch.float32)
     hidden = torch.randn(2, model.hidden_size)
     oracle = torch.tensor([True, True])
-    prediction = model.predict(hidden, oracle)
-    torch.testing.assert_close(prediction, model.execution(hidden))
-    counts = torch.tensor([[[1., 2.], [0., 2.]], [[0., 2.], [2., 2.]]])
+    prediction = model.predict(hidden, oracle, torch.tensor([1, 2]))
+    torch.testing.assert_close(prediction, model.execution(hidden)[torch.arange(2), torch.tensor([0, 1])])
+    counts = torch.tensor([[0., 2.], [2., 2.]])
     model.loss(prediction, counts, oracle).mean().backward()
     for parameter in model.acquisition.parameters():
         assert parameter.grad is not None
@@ -118,21 +119,18 @@ def test_metrics_score_outcomes_not_noisy_means() -> None:
     nll, brier = outcome_scores(np.array([0.5]), np.array([[1, 2]]))
     np.testing.assert_allclose(nll, np.log(2))
     np.testing.assert_allclose(brier, 0.25)
-    labels = np.array([[[2, 2], [0, 2]]])
-    _, terminal = terminal_scores(np.array([[0., 2.]]), labels)
-    assert terminal[0] > 0.7
+    report = evaluation_report(np.array([2.]), np.array([[0, 2]]), ["problem"])
+    assert report["terminal_brier"] > 0.7
 
 
 def test_checkpoint_selection_matches_problem_macro_report() -> None:
     """Unequal prefix counts must not make checkpoint selection prefer the worse problem-level critic."""
-    labels = np.zeros((4, 1, 2))
-    labels[:, 0, :] = 1
+    labels = np.ones((4, 2))
     problem_keys = ["problem-A"] * 3 + ["problem-B"]
     available = np.array([True, False, True, True])
     selected_scores = []
     for probabilities in ([0.9, 0.9, 0.9, 0.1], [0.5, 0.5, 0.5, 0.5]):
-        logits = np.zeros((4, 1))
-        logits[:, 0] = logit(probabilities)
+        logits = logit(probabilities)
         metrics = compute_metrics(EvalPrediction(cast(Any, (logits, logits, available)), labels), problem_keys)
         report = evaluation_report(logits, labels, problem_keys)
         assert metrics["terminal_nll"] == report["terminal_nll"]
@@ -153,9 +151,9 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, critic_settings: 
         model.acquisition.bias.fill_(confidence)
         model.execution.weight.zero_()
         model.execution.bias.fill_(confidence)
-    counts = torch.tensor([[[1., 2.], [1., 2.]]])
+    counts = torch.tensor([[1., 2.]])
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        prediction = model.predict(torch.zeros(1, model.hidden_size), torch.tensor([False]))
+        prediction = model.predict(torch.zeros(1, model.hidden_size), torch.tensor([False]), torch.tensor([2]))
         loss = model.loss(prediction, counts, torch.tensor([False])).mean()
     assert torch.isfinite(prediction).all()
     assert torch.isfinite(loss)
@@ -170,9 +168,10 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
     """Preserve the original discrete convolution and its gradients across budgets and autocast modes."""
     settings = critic_settings("de").model_copy(update={"horizon": horizon})
     model = DECritic.create_from_pretrained(settings, torch.float32)
-    hidden = torch.randn(3, model.hidden_size, requires_grad=True)
+    remaining = torch.arange(1, horizon)
+    hidden = torch.randn(len(remaining), model.hidden_size, requires_grad=True)
     with torch.autocast("cpu", dtype=dtype, enabled=dtype == torch.bfloat16):
-        prediction = model.predict(hidden, torch.zeros(len(hidden), dtype=torch.bool))
+        prediction = model.predict(hidden, torch.zeros(len(hidden), dtype=torch.bool), remaining)
         discovered, alpha = model.acquisition(hidden).float().sigmoid().unbind(dim=-1)
         epsilon = model.execution(hidden).float().sigmoid()
     curve = []
@@ -182,7 +181,7 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
             value = value + (1 - discovered) * alpha * (1 - alpha).pow(delay) * epsilon[:, end - delay]
         curve.append(value)
     prior = torch.stack(curve, dim=-1).clamp(PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
-    expected = torch.logit(prior)
+    expected = torch.logit(prior)[torch.arange(len(remaining)), remaining - 1]
     actual = prediction
     assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected)

@@ -48,11 +48,12 @@ class BaseTrainer(Trainer):
         Each example has one history and one set of continuation labels. Oracle histories already include the sketch message; a privileged view appends the reference solution to that same history.
 
         Returns:
-            The scalar loss, or (loss, outputs) when Trainer requests predictions. Outputs retain separate logits for both views, each shaped [B, horizons], plus a [B] privileged_available mask. Zero-filled privileged logits for missing references must be ignored using that mask.
+            The scalar loss, or (loss, outputs) when Trainer requests predictions. Outputs retain separate terminal logits for both views, each shaped [B], plus a [B] privileged_available mask. Zero-filled privileged logits for missing references must be ignored using that mask.
         """
         counts = inputs.pop("labels")
         indices = inputs.pop("privileged_indices")
-        logits = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], oracle=inputs["oracle"])
+        logits = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], oracle=inputs["oracle"],
+                       remaining_blocks=inputs["remaining_blocks"])
         unprivileged_logits = logits[:len(counts)]
         oracle = inputs["oracle"][:len(counts)]
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))

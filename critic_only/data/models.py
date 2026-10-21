@@ -17,10 +17,9 @@ class PreparationConfig(BaseModel):
     destination: Path
     solver_model: str
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
-    test_year: int = Field(gt=0)
     validation_fraction: float = Field(gt=0, lt=1)
     split_seed: int = Field(ge=0)
-    source_revision: str
+    source_revision: str | None
 
 
 class BranchOutcome(BaseModel):
@@ -32,7 +31,7 @@ class BranchOutcome(BaseModel):
     path: str
 
 
-class PrefixRecord(BaseModel):
+class InputPrefix(BaseModel):
     """One actual solver history and the outcomes of branches continuing that history."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -50,7 +49,7 @@ class PrefixRecord(BaseModel):
     branches: list[BranchOutcome]
 
     @model_validator(mode="after")
-    def validate_branches(self) -> "PrefixRecord":
+    def validate_branches(self) -> "InputPrefix":
         """Require unique independent branch identities and complete future outcome vectors."""
         identities = [item.seed for item in self.branches]
         if len(identities) != len(set(identities)):

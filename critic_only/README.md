@@ -1,37 +1,37 @@
 # Critic-only experiments
 
-Train critics on saved DELVE continuation branches with a fixed solver. Compare `ordinary` (ordinary outcomes), `oracle-supervised` (ordinary and oracle outcomes), and `de` (the same supervision with a discovery–execution formula). All use BF16, all-linear LoRA, and trainable prediction heads.
+Learn to predict whether a frozen solver's final answer will be correct after using its remaining self-refinement budget. These experiments train only the critic; they generate no new solver trajectories.
 
-Install separately from the vLLM serving environment:
+1. **Setup:** Read saved `continue` and `continue-oracle` branches and their audits. For example, a prefix at 2× with eight branches continued to 5× becomes one example with three blocks remaining. If three branches finish correctly, its label is `[3 successes, 8 trials]`. Earlier correct answers do not count if the final answer is wrong. Ordinary and sketch-injected histories become separate examples; future branch text never enters the input.
+2. **Input and prediction:** The model's chat template places critic instructions in the system message and the saved trajectory in the user message. One transformer forward reads the whole input; its last non-padding hidden state produces one scalar probability of final-budget success. The critic does not generate an answer as text.
+3. **Training:** Initialize from the solver's model and train LoRA adapters plus prediction heads using binary outcome likelihood from the counts. When a matching reference solution exists, also encode a second view with that solution in the system message, explicitly unavailable to the solver. Average the two losses, not the predictions. The reference follows the solution selection recorded during collection.
+
+| Variant | Training histories | Prediction |
+|---|---|---|
+| `ordinary` | Ordinary only | Direct scalar head |
+| `oracle-supervised` | Ordinary and sketch-injected | Same direct scalar head |
+| `de` | Ordinary and sketch-injected | Discovery–execution formula evaluated at the remaining budget |
+
+DE learns discovery and execution parameters internally, but only its final scalar is supervised. Compare it with `oracle-supervised` to test the structural prior under the same supervision.
+
+Setup saves Parquet and pretokenized Arrow under `data/critic_only/`; training reuses those tokens each epoch. For local outputs, replace `--outputs-repo ... --revision ...` with `--outputs-directory <path>`. Problems from 2026 onward are test-only. Older problems split approximately 80/20 into train/validation with seed 1234, keeping every example of a problem together. `--oracle-supervision-fraction` limits the fraction of training problems contributing oracle examples.
+
+Install separately from vLLM, process once with matching local problems in `data/datasets/`, then train on two GPUs:
 
 ```bash
 uv sync --locked --extra frozen
-```
-
-Process once, using matching local problem datasets and pinned outputs/model revisions:
-
-```bash
-uv run --extra frozen python -m critic_only.cli.setup --outputs-repo notadib/DELVE-Outputs --revision <outputs-commit> --solver-model qwen3-4b-instruct-2507 --backbone Qwen/Qwen3-4B-Instruct-2507 --backbone-revision <model-commit>
-```
-
-This saves Parquet and tokenized Arrow under `data/critic_only/`. Each row contains an actual solver history and future branch success/trial counts. Oracle rows include the exact saved sketch-injection message; neither history includes generated continuations. Labels grade the final answer at that checkpoint, not whether an earlier answer was correct. References match the collection's solution selection. All variants average losses with and without a reference when available.
-
-Problems from 2026 onward are test-only; older problems split 80/20 into train/validation with seed 1234. All prefixes and both history types of a problem stay together. Ordinary trains only on ordinary histories; the other variants also train on oracle histories. Use `--oracle-supervision-fraction` and `--branch-limit` during setup to limit training supervision.
-
-Train each variant on two GPUs:
-
-```bash
+uv run --extra frozen python -m critic_only.cli.setup --outputs-repo notadib/DELVE-Outputs --revision <outputs-commit> --solver-model qwen3-4b-instruct-2507
 for variant in ordinary oracle-supervised de; do
   uv run --extra frozen torchrun --standalone --nproc_per_node=2 -m critic_only.cli.train --variant "$variant" --output "output/critic_only/$variant"
 done
 ```
 
-Defaults: LoRA rank 32, one prefix per GPU, accumulation 8, and gradient checkpointing. References add a second input view; long-prefix GPU memory still needs measurement. Adjust `--batch-size` and `--accumulation-steps`; resume with `--resume <checkpoint-directory>`. Training saves settings, metric history, and epoch checkpoints, with plain-text progress logs.
+Defaults use BF16, LoRA rank 32, one prefix per GPU, gradient accumulation 8, and gradient checkpointing. Adjust `--batch-size` and `--accumulation-steps` to fit memory. Training logs metrics and saves resumable epoch checkpoints; use `--resume <checkpoint-directory>` after interruption.
 
-Evaluate the best checkpoint:
+Every epoch evaluates ordinary validation histories. The best checkpoint minimizes final-outcome NLL without references, averaged per problem, and is saved under `best/`. After choosing settings on validation, evaluate the held-out test set:
 
 ```bash
 uv run --extra frozen python -m critic_only.cli.evaluate --checkpoint output/critic_only/de/best --split test --destination output/critic_only/de/test
 ```
 
-All variants are selected and evaluated on ordinary histories. Evaluation saves NLL/Brier metrics and prediction Parquet separately with and without references. Checkpoint selection uses validation terminal NLL without references, averaged per problem. Compare `de` against `oracle-supervised` to isolate the structural prior's benefit. These experiments evaluate critics; they do not train the solver.
+Evaluation saves `metrics.json` and `predictions.parquet`, reporting scalar predictions and NLL/Brier scores separately with and without reference solutions.

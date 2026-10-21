@@ -120,7 +120,9 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
         losses = []
         for tokens in views:
             ids = torch.tensor([tokens])
-            losses.append(model.loss(model(input_ids=ids, attention_mask=torch.ones_like(ids), oracle=torch.tensor([row["oracle"]])), counts, torch.tensor([row["oracle"]])).squeeze(0))
+            prediction = model(input_ids=ids, attention_mask=torch.ones_like(ids), oracle=torch.tensor([row["oracle"]]),
+                               remaining_blocks=torch.tensor([row["remaining_blocks"]]))
+            losses.append(model.loss(prediction, counts, torch.tensor([row["oracle"]])).squeeze(0))
         expected_losses.append(torch.stack(losses).mean())
     expected = torch.stack(expected_losses).mean()
     torch.testing.assert_close(actual, expected)

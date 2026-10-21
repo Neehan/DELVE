@@ -10,7 +10,7 @@ from critic_only.models.ordinary import Ordinary
 
 
 def create_critic_from_pretrained(settings: CriticConfig, dtype: torch.dtype) -> BaseCritic:
-    """Load a pretrained backbone and fresh heads for the validated critic variant."""
+    """Load a pretrained model and fresh heads for the validated critic variant."""
     if settings.variant == "de":
         return DECritic.create_from_pretrained(settings, dtype)
     if settings.variant == "oracle-supervised":
