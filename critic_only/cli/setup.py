@@ -13,17 +13,17 @@ from transformers.utils.logging import disable_progress_bar
 
 from discovery_execution.harness.constants import CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, MAX_BLOCKS, META_FILENAME, SUPPORTED_MODELS
 from critic_only.constants import (
-    CONDITIONS, DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
+    DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, DEFAULT_ORACLE_SUPERVISION_FRACTION,
     DEFAULT_SEED, DEFAULT_VALIDATION_FRACTION,
     PREPARED_SUBDIRECTORY, PROCESSING_DIRECTORY, TOKENIZED_SUBDIRECTORY,
 )
 from critic_only.data.models import PreparationConfig
-from critic_only.data.processor import DatasetProcessor
+from critic_only.data.processor import DatasetProcessor, select_input_fork
 from critic_only.data.tokenizer import PrefixTokenizer
 
 
 def download_outputs(repository: str, revision: str, solver: str, horizon: int) -> tuple[Path, str]:
-    """Download metadata first, then only the exact source and first-branch snapshots needed."""
+    """Pin metadata, input snapshots, audits, and conversations needed to recover checkpoint phases."""
     resolved = HfApi().dataset_info(repository, revision=revision).sha
     if resolved is None:
         raise ValueError("HF output revision could not be resolved")
@@ -32,16 +32,20 @@ def download_outputs(repository: str, revision: str, solver: str, horizon: int) 
     files = set()
     for path in root.rglob(META_FILENAME):
         metadata = json.loads(path.read_text())
-        if metadata["model"] != solver or metadata["experiment"] not in CONDITIONS or metadata["compute_multiplier_k"] != horizon:
+        if metadata["model"] != solver:
             continue
-        fork = metadata["continue_at"]
-        model_root = root / metadata["competition"] / str(metadata["year"]) / solver
-        source = model_root / metadata["source_arm"] / metadata["problem_id"] / f"seed_{metadata['source_seed']}"
-        needed = (path.parent / "audit.json", path.parent / CHECKPOINT_FILENAME.format(k=fork + 1),
-                  source / CONVERSATION_FILENAME, source / CHECKPOINT_FILENAME.format(k=fork))
+        fork = select_input_fork(metadata, horizon)
+        if fork is None:
+            continue
+        needed = [path.parent / "audit.json", path.parent / CHECKPOINT_FILENAME.format(k=fork + 1),
+                  path.parent / CONVERSATION_FILENAME]
+        if fork:
+            model_root = root / metadata["competition"] / str(metadata["year"]) / solver
+            source = model_root / metadata["source_arm"] / metadata["problem_id"] / f"seed_{metadata['source_seed']}"
+            needed.extend([source / CONVERSATION_FILENAME, source / CHECKPOINT_FILENAME.format(k=fork)])
         files.update(str(item.relative_to(root)) for item in needed)
     if not files:
-        raise ValueError("no matching continuation metadata in HF snapshot")
+        raise ValueError("no matching nonterminal critic inputs in HF snapshot")
     snapshot_download(repository, repo_type="dataset", revision=resolved, allow_patterns=sorted(files))
     return root, resolved
 

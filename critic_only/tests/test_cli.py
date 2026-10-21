@@ -65,7 +65,7 @@ def test_train_and_evaluate_cli(variant: str, critic_settings: Callable[[str], C
 
 
 def test_hf_download_selects_only_needed_snapshots(prepared_inputs: PreparationConfig, monkeypatch: Any) -> None:
-    """Pin both download stages to one commit and avoid fetching every full branch conversation."""
+    """Pin downloads and request conversations for input phases but no later checkpoint files."""
     api = Mock()
     api.dataset_info.return_value.sha = "pinned-commit"
     download = Mock(return_value=str(prepared_inputs.outputs_directory))
@@ -76,7 +76,9 @@ def test_hf_download_selects_only_needed_snapshots(prepared_inputs: PreparationC
     assert download.call_count == 2
     selected = download.call_args_list[-1].kwargs["allow_patterns"]
     assert all("*" not in path for path in selected)
-    assert all("unaided" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert any("continue-oracle" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert any("continue-at" in path for path in selected if path.endswith("conversation.json.zst"))
+    assert not any(path.endswith("checkpoint_3x.json.zst") for path in selected)
     assert all(call.kwargs["revision"] == "pinned-commit" for call in download.call_args_list)
 
 
@@ -103,7 +105,8 @@ def test_setup_cli(prepared_inputs: PreparationConfig, tokenizer: PreTrainedToke
         setup.main()
         assert (destination / "prepared" / "test.parquet").is_file()
         cache = load_from_disk(str(destination / "tokenized"))
-        assert cache["test"][0]["labels"] == [1, 2]
+        assert cache["test"][0]["labels"] == [0, 1]
+        assert len(cache["test"]) == 5
         manifest = json.loads((destination / "tokenized" / MANIFEST_FILENAME).read_text())
         assert manifest["settings"]["model"] == "owner/tiny"
         assert manifest["settings"]["revision"] == "model-commit"

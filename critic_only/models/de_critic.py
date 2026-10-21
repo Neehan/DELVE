@@ -22,7 +22,7 @@ class DECritic(BaseCritic):
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Return the DE value at each history's remaining budget, or its execution value for oracle histories.
 
-        All heads read the supplied history. Oracle examples supervise execution after the actual sketch; unaided examples use the shared execution head inside the discovery convolution. Transferring that structure across histories is an inductive bias, not an identified causal decomposition.
+        All heads read the supplied history. Oracle examples include the actual sketch and one block of solver execution; they supervise the remaining execution value; unaided examples use the shared execution head inside the discovery convolution. Transferring that structure across histories is an inductive bias, not an identified causal decomposition.
 
         With discovery state probability d and remaining budget r, success is d*epsilon_r + (1-d)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_{r-j+1}. Failure replaces epsilon with 1-epsilon and adds (1-d)*(1-alpha)^r for no discovery. Return log(success) - log(failure) without rounding either probability to zero or one.
         """

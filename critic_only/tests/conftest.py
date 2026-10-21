@@ -53,9 +53,33 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
     return create
 
 
+def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[str, str]]], outcomes: list[int]) -> None:
+    """Save real checkpoint boundaries and later conversation text for processor integration tests."""
+    path.mkdir(parents=True)
+    (path / "meta.json").write_text(json.dumps(metadata))
+    fork = metadata.get("continue_at", 0)
+    oracle = metadata["experiment"] in ("oracle-execution", "continue-oracle")
+    checkpoints, requests = [], []
+    for block, messages in enumerate(histories, start=fork + 1):
+        snapshot = {"output_tokens": block * OUTPUT_TOKENS_PER_BLOCK, "messages": messages}
+        (path / f"checkpoint_{block}x.json.zst").write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+        checkpoints.append({"output_tokens": snapshot["output_tokens"], "message_count": len(messages),
+                            "last_message_chars": len(messages[-1]["content"])})
+        requests.append({"output_tokens": snapshot["output_tokens"], "phase": "critique" if block == 2 else "revise",
+                         "finish_reason": "stop" if block == 2 else "length", "injected": oracle})
+    state = {"output_tokens": (fork + len(histories)) * OUTPUT_TOKENS_PER_BLOCK, "messages": histories[-1],
+             "phase": "revise", "injected": oracle, "response_finished": False,
+             "requests": requests, "checkpoints": checkpoints}
+    (path / "conversation.json.zst").write_bytes(zstandard.compress(json.dumps(state).encode()))
+    audit = {"complete": True, "output_tokens": len(histories) * OUTPUT_TOKENS_PER_BLOCK + fork * OUTPUT_TOKENS_PER_BLOCK,
+             "checkpoints": {f"{block}x": {"correctness": {"score": score}}
+                             for block, score in enumerate(outcomes, start=fork + 1)}}
+    (path / "audit.json").write_text(json.dumps(audit))
+
+
 @pytest.fixture
 def prepared_inputs(tmp_path: Path) -> PreparationConfig:
-    """Create one train-era and one test-era problem, with an observed success that later regresses."""
+    """Save root and forked runs with distinct observed reasoning and later correct-to-incorrect revisions."""
     root = tmp_path / "outputs"
     references = tmp_path / "datasets" / "aime"
     references.mkdir(parents=True)
@@ -69,31 +93,34 @@ def prepared_inputs(tmp_path: Path) -> PreparationConfig:
                   "backend": {"temperature": 0.8, "top_p": 0.95, "top_k": 20}, "compute_multiplier_k": 3}
         messages = [{"role": "user", "content": "Find the number."}, {"role": "assistant", "content": "Thinking"}]
         source = model_root / "unaided-3x" / problem["problem_id"] / "seed_0"
-        source.mkdir(parents=True)
-        (source / "meta.json").write_text(json.dumps({**common, "experiment": "unaided", "seed": 0}))
-        snapshot = {"output_tokens": OUTPUT_TOKENS_PER_BLOCK, "messages": messages}
-        (source / "checkpoint_1x.json.zst").write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
-        state = {**snapshot, "phase": "solve", "injected": False, "response_finished": False,
-                 "requests": [{"output_tokens": OUTPUT_TOKENS_PER_BLOCK, "phase": "solve", "finish_reason": "length", "injected": False}],
-                 "checkpoints": [{"output_tokens": OUTPUT_TOKENS_PER_BLOCK, "message_count": len(messages),
-                                  "last_message_chars": len(messages[-1]["content"])}]}
-        (source / "conversation.json.zst").write_bytes(zstandard.compress(json.dumps(state).encode()))
+        write_run(source, {**common, "experiment": "unaided", "seed": 0},
+                  [messages, messages + [{"role": "assistant", "content": "Parent later reasoning"}],
+                   messages + [{"role": "assistant", "content": "Parent later reasoning FINAL FUTURE"}]], [1, 1, 0])
         for condition in ("continue", "continue-oracle"):
             for seed in range(2):
                 branch = model_root / f"{condition}-at-1x" / problem["problem_id"] / "seed_0" / f"branch_{seed}"
-                branch.mkdir(parents=True)
                 metadata = {**common, "experiment": condition, "seed": seed, "source_seed": 0, "source_arm": "unaided-3x",
                             "continue_at": 1, "solution_index": 0}
-                (branch / "meta.json").write_text(json.dumps(metadata))
                 continued = messages + [{"role": "user", "content": "Use symmetry."}] if condition == "continue-oracle" else messages
-                next_snapshot = {"output_tokens": 2 * OUTPUT_TOKENS_PER_BLOCK, "messages": continued}
-                (branch / "checkpoint_2x.json.zst").write_bytes(zstandard.compress(json.dumps(next_snapshot).encode()))
-                audit = {"complete": True, "output_tokens": 3 * OUTPUT_TOKENS_PER_BLOCK,
-                         "checkpoints": {"2x": {"correctness": {"score": 1}}, "3x": {"correctness": {"score": seed}}}}
-                (branch / "audit.json").write_text(json.dumps(audit))
+                observed = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed}"}]
+                final = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed} FINAL FUTURE"}]
+                write_run(branch, metadata, [observed, final], [1, seed])
     return PreparationConfig(outputs_directory=root, datasets_directory=references.parent, destination=tmp_path / "prepared",
                              solver_model="tiny", horizon=3, validation_fraction=0.2,
                              split_seed=42, source_revision="fixture")
+
+
+@pytest.fixture
+def replace_saved_text() -> Callable[[Path, str, str], None]:
+    """Update test checkpoint text and its conversation copy without invalidating boundary offsets."""
+    def replace(directory: Path, old: str, new: str) -> None:
+        """Replace text in fixture messages; the edited instruction precedes the final assistant message."""
+        for path in directory.glob("*.zst"):
+            data = json.loads(zstandard.decompress(path.read_bytes()))
+            for message in data["messages"]:
+                message["content"] = message["content"].replace(old, new)
+            path.write_bytes(zstandard.compress(json.dumps(data).encode()))
+    return replace
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Shared critic construction, checkpoints, prefix pooling, and count-weighted objective."""
+"""Shared critic construction, checkpoints, history encoding, and terminal-outcome loss."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -81,9 +81,9 @@ class BaseCritic(nn.Module, ABC):
             counts: Labels [examples, 2], with [successful branches, total branches]. Success grades the last answer when the remaining budget is exhausted, not any earlier answer.
             oracle: Boolean mask [examples] identifying histories with an injected sketch, used only for loss weighting.
 
-        For successes s, trials n, and probability p = sigmoid(logit), the negative log-likelihood is -s*log(p) - (n-s)*log(1-p). Thus [3, 8] represents three successes and five failures. The parameter-independent binomial coefficient is omitted.
+        For successes s, trials n, and probability p = sigmoid(logit), the negative log-likelihood is -s*log(p) - (n-s)*log(1-p). Branch-specific inputs have n=1 and s equal to that branch's final binary grade, so this is binary cross-entropy.
 
-        Divide by the number of observed branches for this history, giving each history equal weight regardless of branch count. Only terminal outcomes contribute; earlier checkpoints are not auxiliary targets.
+        Normalize by the trial count, giving each observed history equal weight. Only terminal outcomes contribute; earlier checkpoints are not auxiliary targets.
 
         Oracle examples receive oracle_weight; unaided examples receive weight one. PPOCritic training excludes oracle examples before batching.
 

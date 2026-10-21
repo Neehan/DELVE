@@ -1,7 +1,9 @@
 """Guard against prefix leakage, cumulative labels, split leakage, and silent truncation."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -11,19 +13,20 @@ from transformers import PreTrainedTokenizerFast
 
 from critic_only.constants import CRITIC_PROMPT_PATH, MANIFEST_FILENAME, REFERENCE_PROMPT_PATH
 from critic_only.data.models import PreparationConfig
-from critic_only.data.processor import DatasetProcessor, selection_fraction
+from critic_only.data.processor import DatasetProcessor, select_input_fork, selection_fraction
+from critic_only.tests.conftest import write_run
 from critic_only.data.tokenizer import PrefixTokenizer
 
 
 def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: PreTrainedTokenizerFast, tmp_path: Path) -> None:
     """Retain regressions, mask only training oracle supervision, and round-trip cached tokens."""
     DatasetProcessor(prepared_inputs).run()
-    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))
-    row = dict(rows[0])
-    assert row["branches"][0]["outcomes"] == [1, 0]
-    assert row["messages"][-1]["content"] == "Thinking"
-    assert len(rows) == 2 and len(row["branches"]) == 2
-    assert row["remaining_blocks"] == 2 and "horizon" not in row
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    row = next(dict(row) for row in rows if row["fork"] == 1 and not row["oracle"] and row["branch"]["seed"] == 0)
+    assert row["branch"]["outcomes"] == [0]
+    assert row["messages"][-1]["content"] == "Observed continue branch 0"
+    assert len(rows) == 5
+    assert row["remaining_blocks"] == 1 and "horizon" not in row
     settings = {"model": "tiny", "revision": "local", "max_length": 256,
                 "oracle_supervision_fraction": 0, "seed": 42}
     processor = PrefixTokenizer(tokenizer)
@@ -31,16 +34,17 @@ def test_prepare_and_tokenize(prepared_inputs: PreparationConfig, tokenizer: Pre
     assert not {"fork", "attention_mask", "horizon"} & encoded.keys()
     assert len(encoded["privileged_input_ids"]) > len(encoded["input_ids"])
     assert "reference_solution" not in encoded
-    assert encoded["labels"] == [1, 2]
-    assert encoded["remaining_blocks"] == 2
+    assert encoded["labels"] == [0, 1]
+    assert encoded["remaining_blocks"] == 1
     row["split"] = "train"
     assert processor._retain_example(row, settings)
-    oracle_row = {**dict(rows[1]), "split": "train"}
+    oracle_row = {**next(dict(row) for row in rows if row["oracle"]), "split": "train"}
     assert not processor._retain_example(oracle_row, settings)
     destination = tmp_path / "tokenized"
     processor.run(prepared_inputs.destination, destination, settings)
-    assert load_from_disk(str(destination))["test"][0]["input_ids"] == encoded["input_ids"]
-    assert load_from_disk(str(destination))["test"][0]["privileged_input_ids"] == encoded["privileged_input_ids"]
+    saved = next(item for item in cast(Dataset, load_from_disk(str(destination))["test"]).to_list() if item["prefix_id"] == row["prefix_id"])
+    assert saved["input_ids"] == encoded["input_ids"]
+    assert saved["privileged_input_ids"] == encoded["privileged_input_ids"]
     assert json.loads((destination / MANIFEST_FILENAME).read_text())["input_sha256"]
     with pytest.raises(FileExistsError):
         processor.run(prepared_inputs.destination, destination, settings)
@@ -54,47 +58,33 @@ def test_branch_snapshots_are_read_once(prepared_inputs: PreparationConfig, monk
     processor.run()
     paths = [call.args[0] for call in read.call_args_list]
     for snapshot in prepared_inputs.outputs_directory.rglob("checkpoint_2x.json.zst"):
-        assert paths.count(snapshot) == 1
+        assert paths.count(snapshot) == (1 if "continue" in str(snapshot) else 0)
 
 
-def test_oracle_history_contains_only_saved_intervention(prepared_inputs: PreparationConfig,
-                                                         tokenizer: PreTrainedTokenizerFast) -> None:
-    """Preserve the exact saved intervention without leaking any generated branch continuation."""
-    injection = "Verified sketch: Use symmetry. Follow this sketch."
-    for path in prepared_inputs.outputs_directory.rglob("checkpoint_2x.json.zst"):
-        snapshot = json.loads(zstandard.decompress(path.read_bytes()))
-        if "continue-oracle-at-1x" in str(path):
-            snapshot["messages"][-1]["content"] = injection
-            audit_path = path.parent / "audit.json"
-            audit = json.loads(audit_path.read_text())
-            for checkpoint in audit["checkpoints"].values():
-                checkpoint["correctness"]["score"] = 0
-            audit_path.write_text(json.dumps(audit))
-        snapshot["messages"].append({"role": "assistant", "content": "FUTURE ANSWER MUST NOT ENTER CRITIC"})
-        path.write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+def test_oracle_history_contains_solver_response(prepared_inputs: PreparationConfig,
+                                                  tokenizer: PreTrainedTokenizerFast) -> None:
+    """Expose the sketch and branch-specific execution, but no later text, grades, or sibling outcomes."""
     DatasetProcessor(prepared_inputs).run()
-    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))
-    unaided, oracle = dict(rows[0]), dict(rows[1])
-    assert not unaided["oracle"] and oracle["oracle"]
-    assert oracle["messages"] == unaided["messages"] + [{"role": "user", "content": injection}]
-    assert oracle["phase"] == "solve" and oracle["response_finished"] is False
-    assert all("FUTURE ANSWER" not in message["content"] for row in (unaided, oracle) for message in row["messages"])
-    settings = {"max_length": 256, "oracle_supervision_fraction": 1, "seed": 1234}
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    oracle = [dict(row) for row in rows if row["oracle"]]
+    assert len(oracle) == 2 and oracle[0]["messages"] != oracle[1]["messages"]
     processor = PrefixTokenizer(tokenizer)
-    plain, injected = processor.encode(dict(unaided), settings), processor.encode(dict(oracle), settings)
-    assert not plain["oracle"] and injected["oracle"]
-    assert len(injected["input_ids"]) > len(plain["input_ids"])
-    assert plain["labels"] == [1, 2]
-    assert injected["labels"] == [0, 2]
+    for row in oracle:
+        assert row["messages"][-2] == {"role": "user", "content": "Use symmetry."}
+        assert row["messages"][-1]["content"] == f"Observed continue-oracle branch {row['branch']['seed']}"
+        assert row["phase"] == "critique" and row["response_finished"] is True
+        assert all("FINAL FUTURE" not in message["content"] for message in row["messages"])
+        encoded = processor.encode(row, {"max_length": 256})
+        assert encoded["labels"] == [row["branch"]["seed"], 1]
+        assert encoded["remaining_blocks"] == 1
+    assert len({row["prefix_id"] for row in rows}) == len(rows)
 
 
-def test_different_oracle_messages_cannot_share_labels(prepared_inputs: PreparationConfig) -> None:
-    """Reject pooling branches with different interventions even when they contain the same sketch."""
-    path = next(path for path in prepared_inputs.outputs_directory.rglob("checkpoint_2x.json.zst")
-                if "continue-oracle-at-1x" in str(path))
-    snapshot = json.loads(zstandard.decompress(path.read_bytes()))
-    snapshot["messages"][-1]["content"] += " A different instruction."
-    path.write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+def test_different_oracle_messages_are_rejected(prepared_inputs: PreparationConfig,
+                                               replace_saved_text: Callable[[Path, str, str], None]) -> None:
+    """Require matched interventions when collecting branches from the same source."""
+    path = next(path for path in prepared_inputs.outputs_directory.rglob("branch_0") if "continue-oracle-at-1x" in str(path))
+    replace_saved_text(path, "Use symmetry.", "Use symmetry. A different instruction.")
     with pytest.raises(ValueError, match="different injection messages"):
         DatasetProcessor(prepared_inputs).run()
 
@@ -156,21 +146,21 @@ def test_all_branches_and_independent_oracle_selection(prepared_inputs: Preparat
     processor = PrefixTokenizer(tokenizer)
     settings = {"max_length": 256, "oracle_supervision_fraction": 0.25,
                 "seed": 42}
-    assert processor.encode(row, settings)["labels"][1] == 2
+    assert processor.encode(row, settings)["labels"][1] == 1
     row["split"] = "train"
     key = next(f"problem-{i}" for i in range(1000)
                if selection_fraction(f"problem-{i}", 42) > 0.5
                and selection_fraction(f"oracle:problem-{i}", 42) < 0.25)
     row["problem_key"] = key
     encoded = processor.encode(row, settings)
-    assert encoded["labels"][1] == 2
+    assert encoded["labels"][1] == 1
     assert processor._retain_example({**row, "oracle": True}, settings)
 
 
 @pytest.mark.parametrize("oracle_index", [None, 0, 1])
 @pytest.mark.parametrize("source_seed", [0, 1, 3, 4])
 def test_reference_pair_follows_collection(prepared_inputs: PreparationConfig, oracle_index: int | None,
-                                          source_seed: int) -> None:
+                                          source_seed: int, replace_saved_text: Callable[[Path, str, str], None]) -> None:
     """Keep a saved oracle selection, or use source-seed round robin when oracle branches are absent."""
     for path in prepared_inputs.datasets_directory.rglob("*.jsonl"):
         problem = json.loads(path.read_text())
@@ -185,10 +175,7 @@ def test_reference_pair_follows_collection(prepared_inputs: PreparationConfig, o
             metadata["source_seed"] = source_seed
         if metadata["experiment"] == "continue-oracle" and oracle_index is not None:
             metadata["solution_index"] = oracle_index
-            snapshot_path = path.parent / "checkpoint_2x.json.zst"
-            snapshot = json.loads(zstandard.decompress(snapshot_path.read_bytes()))
-            snapshot["messages"][-1]["content"] = "Count the complement." if oracle_index else "Use symmetry."
-            snapshot_path.write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+            replace_saved_text(path.parent, "Use symmetry.", "Count the complement." if oracle_index else "Use symmetry.")
         path.write_text(json.dumps(metadata))
     for directory in list(prepared_inputs.outputs_directory.rglob("seed_0")):
         directory.rename(directory.with_name(f"seed_{source_seed}"))
@@ -196,13 +183,14 @@ def test_reference_pair_follows_collection(prepared_inputs: PreparationConfig, o
         for directory in list(prepared_inputs.outputs_directory.rglob("continue-oracle-at-1x")):
             directory.rename(prepared_inputs.destination.parent / f"withheld-oracle-{directory.parent.parent.name}")
     DatasetProcessor(prepared_inputs).run()
-    row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[0])
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    row = next(dict(row) for row in rows if row["fork"] == 1 and not row["oracle"])
     selected = source_seed % 2 if oracle_index is None else oracle_index
     assert row["solution_index"] == selected
     assert row["reference_solution"] == ("Alternate proof." if selected else "The answer is one.")
     if oracle_index is not None:
-        injected = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[1])
-        assert injected["messages"][-1]["content"] == ("Count the complement." if selected else "Use symmetry.")
+        injected = next(dict(row) for row in rows if row["oracle"])
+        assert injected["messages"][-2]["content"] == ("Count the complement." if selected else "Use symmetry.")
 
 
 def test_optional_reference_encoding(prepared_inputs: PreparationConfig, tokenizer: PreTrainedTokenizerFast,
@@ -233,7 +221,7 @@ def test_chat_prompt_preserves_history_and_separates_reference(prepared_inputs: 
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep unfinished reasoning and sketches verbatim, with references restricted to the privileged view."""
     DatasetProcessor(prepared_inputs).run()
-    row = dict(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))[1])
+    row = next(dict(row) for row in Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list() if row["oracle"])
     row["messages"][1]["content"] = "<think>unfinished reasoning with {symbols}"
     template = Mock(wraps=tokenizer.apply_chat_template)
     monkeypatch.setattr(tokenizer, "apply_chat_template", template)
@@ -243,7 +231,7 @@ def test_chat_prompt_preserves_history_and_separates_reference(prepared_inputs: 
     plain, privileged = [call.args[0] for call in template.call_args_list]
     assert [message["role"] for message in plain] == ["system", "user"]
     assert plain[1] == privileged[1]
-    assert "Remaining budget: 2 blocks" in plain[0]["content"]
+    assert "Remaining budget: 1 blocks" in plain[0]["content"]
     for message in row["messages"]:
         assert message["content"] in plain[1]["content"]
     assert row["reference_solution"] not in plain[1]["content"]
@@ -255,3 +243,103 @@ def test_chat_prompt_preserves_history_and_separates_reference(prepared_inputs: 
     for call in template.call_args_list:
         assert call.kwargs == {"tokenize": True, "add_generation_prompt": False,
                                "truncation": False, "return_dict": False}
+
+
+def test_root_oracle_runs_and_round_robin(prepared_inputs: PreparationConfig) -> None:
+    """Treat full-budget oracle-at-zero seeds as independent 1x inputs with their saved reference selection."""
+    for path in prepared_inputs.datasets_directory.rglob("*.jsonl"):
+        problem = json.loads(path.read_text())
+        problem["solutions"].append({"source": "ai_generated", "solution": "Alternate proof.", "sketch": "Count the complement."})
+        path.write_text(json.dumps(problem) + "\n")
+    for path in list(prepared_inputs.outputs_directory.rglob("meta.json")):
+        metadata = json.loads(path.read_text())
+        if metadata["experiment"] != "unaided":
+            continue
+        for seed in range(2):
+            sketch = "Count the complement." if seed else "Use symmetry."
+            initial = [{"role": "user", "content": f"Find the number. Verified sketch: {sketch}"}]
+            histories = [initial + [{"role": "assistant", "content": f"Root {seed} block {block}"}]
+                         for block in range(1, 4)]
+            # Saved conversations append to this response; preserve earlier snapshot character boundaries.
+            for block in range(1, 3):
+                histories[block][-1]["content"] = histories[block - 1][-1]["content"] + f" block {block + 1}"
+            directory = path.parent.parent.parent.parent / "oracle-at-0x-execution" / metadata["problem_id"] / f"seed_{seed}"
+            write_run(directory, {**metadata, "experiment": "oracle-execution", "inject_sketch_at": 0,
+                                   "solution_index": seed, "seed": seed}, histories, [1, 1, seed])
+    DatasetProcessor(prepared_inputs).run()
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    roots = [row for row in rows if row["fork"] == 0 and row["oracle"]]
+    assert len(roots) == 2
+    for row in roots:
+        assert row["remaining_blocks"] == 2
+        assert row["solution_index"] == row["branch"]["seed"]
+        assert row["branch"]["outcomes"] == [1, row["branch"]["seed"]]
+        assert row["reference_solution"] == ("Alternate proof." if row["solution_index"] else "The answer is one.")
+        assert row["messages"][-1]["content"] == f"Root {row['branch']['seed']} block 1"
+
+
+@pytest.mark.parametrize("experiment,fork,expected", [("continue", 1, 1), ("continue-oracle", 3, 3),
+                                                     ("continue", 4, None), ("unaided", None, 0),
+                                                     ("oracle-execution", 0, 0), ("oracle-execution", 1, None)])
+def test_nonterminal_input_selection(experiment: str, fork: int | None, expected: int | None) -> None:
+    """A 5x budget accepts observed inputs at 1x through 4x and excludes terminal or delayed-root-oracle inputs."""
+    metadata = {"experiment": experiment, "continue_at": fork, "inject_sketch_at": fork, "compute_multiplier_k": 5}
+    assert select_input_fork(metadata, 5) == expected
+    assert select_input_fork(metadata, 3) is None
+
+
+def test_terminal_forks_are_not_read(prepared_inputs: PreparationConfig) -> None:
+    """A fork whose next checkpoint is terminal must not create a trivial final-answer example."""
+    source = next(prepared_inputs.outputs_directory.rglob("branch_0"))
+    metadata = json.loads((source / "meta.json").read_text())
+    metadata["continue_at"] = 2
+    terminal = source.parent / "terminal"
+    terminal.mkdir()
+    (terminal / "meta.json").write_text(json.dumps(metadata))
+    DatasetProcessor(prepared_inputs).run()
+    assert len(Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet"))) == 5
+
+
+def test_duplicate_branch_identity_rejected(prepared_inputs: PreparationConfig) -> None:
+    """Do not count copied trajectories as additional independent training examples."""
+    source = next(prepared_inputs.outputs_directory.rglob("branch_0"))
+    copied = source.parent / "copy"
+    copied.mkdir()
+    (copied / "meta.json").write_bytes((source / "meta.json").read_bytes())
+    with pytest.raises(ValueError, match="duplicate branch"):
+        DatasetProcessor(prepared_inputs).run()
+
+
+def test_input_checkpoint_excludes_later_phase_and_text(prepared_inputs: PreparationConfig) -> None:
+    """Recover stop status and phase at 2x even though the completed conversation ends in a different phase."""
+    DatasetProcessor(prepared_inputs).run()
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    for row in rows:
+        assert all("FINAL FUTURE" not in message["content"] for message in row["messages"])
+        if row["fork"] == 1:
+            assert row["phase"] == "critique" and row["response_finished"] is True
+            assert row["branch"]["outcomes"] == [row["branch"]["seed"]]
+        assert row["split"] == "test"
+
+
+def test_eight_branches_produce_eight_inputs_per_condition(prepared_inputs: PreparationConfig,
+                                                          tokenizer: PreTrainedTokenizerFast) -> None:
+    """Keep eight distinct post-1x histories and individual labels for each intervention condition."""
+    for path in list(prepared_inputs.outputs_directory.rglob("branch_0/meta.json")):
+        metadata = json.loads(path.read_text())
+        first = json.loads(zstandard.decompress((path.parent / "checkpoint_2x.json.zst").read_bytes()))
+        prefix = first["messages"][:-1]
+        for seed in range(2, 8):
+            text = f"Observed branch {seed}"
+            histories = [prefix + [{"role": "assistant", "content": text}],
+                         prefix + [{"role": "assistant", "content": text + " FINAL FUTURE"}]]
+            write_run(path.parent.with_name(f"branch_{seed}"), {**metadata, "seed": seed}, histories, [1, seed % 2])
+    DatasetProcessor(prepared_inputs).run()
+    rows = Dataset.from_parquet(str(prepared_inputs.destination / "test.parquet")).to_list()
+    encoder = PrefixTokenizer(tokenizer)
+    for oracle in (False, True):
+        examples = [row for row in rows if row["fork"] == 1 and row["oracle"] == oracle]
+        assert len(examples) == 8
+        assert len({row["messages"][-1]["content"] for row in examples}) == 8
+        for row in examples:
+            assert encoder.encode(row, {"max_length": 256})["labels"] == [row["branch"]["seed"] % 2, 1]

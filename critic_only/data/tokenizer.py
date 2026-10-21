@@ -50,7 +50,7 @@ class PrefixTokenizer:
     def encode(self, row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         """Apply the model's chat template to critic instructions and the history being evaluated.
 
-        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. Labels are [successful branches, total branches] at the final budget; earlier correctness is not a training target.
+        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. Each branch supplies one final binary outcome, encoded as [outcome, 1]; earlier grades are neither inputs nor training targets.
         """
         record = InputPrefix.model_validate(dict(row))
         conversation = "\n\n".join(f"{item['role']}:\n{item['content']}" for item in record.messages)
@@ -65,8 +65,7 @@ class PrefixTokenizer:
             privileged_system = system + "\n\n" + self.reference_prompt.format(solution=record.reference_solution)
             privileged_messages = [{"role": "system", "content": privileged_system}, messages[1]]
             privileged_ids = self._encode_messages(privileged_messages, settings["max_length"], record.prefix_id)
-        branches = record.branches
-        counts = [sum(item.outcomes[-1] for item in branches), len(branches)]
+        counts = [record.branch.outcomes[-1], 1]
         return {"input_ids": token_ids, "privileged_input_ids": privileged_ids,
                 "labels": counts, "remaining_blocks": record.remaining_blocks,
                 "length": len(privileged_ids) if privileged_ids is not None else len(token_ids),

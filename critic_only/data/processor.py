@@ -11,11 +11,27 @@ import zstandard
 from datasets import Dataset
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK,
+    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, ORACLE_EXPERIMENTS, OUTPUT_TOKENS_PER_BLOCK,
 )
 from discovery_execution.harness.models import Problem, RunState
 from critic_only.constants import CONDITIONS, HASH_SCALE, MANIFEST_FILENAME, SPLITS, TEST_YEAR
 from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfig
+
+
+def select_input_fork(metadata: dict[str, Any], horizon: int) -> int | None:
+    """Select root runs and continuation forks with one observed block and a nonterminal future."""
+    if metadata["compute_multiplier_k"] != horizon:
+        return None
+    experiment = metadata["experiment"]
+    if experiment in CONDITIONS:
+        fork = metadata["continue_at"]
+        if not 1 <= fork < horizon:
+            raise ValueError("continuation fork must precede the destination horizon")
+    elif experiment == "unaided" or (experiment == "oracle-execution" and metadata["inject_sketch_at"] == 0):
+        fork = 0
+    else:
+        return None
+    return fork if fork + 1 < horizon else None
 
 
 def selection_fraction(key: str, seed: int) -> float:
@@ -46,17 +62,25 @@ class DatasetProcessor:
         if self.config.destination.exists():
             raise FileExistsError(self.config.destination)
         groups: dict[tuple[Any, ...], list[tuple[Path, dict[str, Any]]]] = defaultdict(list)
+        records = []
         for path in sorted(self.config.outputs_directory.rglob(META_FILENAME)):
             metadata = self._read_json(path)
-            if metadata["model"] != self.config.solver_model or metadata["experiment"] not in CONDITIONS:
+            if metadata["model"] != self.config.solver_model:
                 continue
-            if metadata["compute_multiplier_k"] != self.config.horizon:
+            fork = select_input_fork(metadata, self.config.horizon)
+            if fork is None:
                 continue
-            key = tuple(metadata[name] for name in ("competition", "year", "problem_id", "source_arm", "source_seed", "continue_at"))
-            groups[key].append((path.parent, metadata))
-        if not groups:
-            raise ValueError("no matching continuation trajectories")
-        records = [record for group in groups.values() for record in self._build_records(group)]
+            if fork == 0:
+                problem = self._load_problem(metadata)
+                selected = metadata["solution_index"] if metadata["experiment"] in ORACLE_EXPERIMENTS else None
+                index = problem.select_solution_index(metadata["seed"], selected)
+                records.append(self._build_record(path.parent, metadata, index))
+            else:
+                key = tuple(metadata[name] for name in ("competition", "year", "problem_id", "source_arm", "source_seed", "continue_at"))
+                groups[key].append((path.parent, metadata))
+        records.extend(record for group in groups.values() for record in self._build_records(group))
+        if not records:
+            raise ValueError("no matching trajectories with a nonterminal critic input")
         self._publish(records)
 
     def _read_json(self, path: Path) -> Any:
@@ -83,11 +107,8 @@ class DatasetProcessor:
         return self.problems[key][metadata["problem_id"]]
 
     def _build_records(self, group: list[tuple[Path, dict[str, Any]]]) -> list[InputPrefix]:
-        """Create separate examples before and after the saved sketch intervention."""
+        """Validate the common source, then retain each branch's own post-continuation history."""
         _, metadata = group[0]
-        fork = metadata["continue_at"]
-        if not 1 <= fork < self.config.horizon:
-            raise ValueError("fork must precede the destination horizon")
         root = self.config.outputs_directory / metadata["competition"] / str(metadata["year"]) / metadata["model"]
         source = root / metadata["source_arm"] / metadata["problem_id"] / f"seed_{metadata['source_seed']}"
         parent = self._read_json(source / META_FILENAME)
@@ -96,85 +117,94 @@ class DatasetProcessor:
                 raise ValueError(f"source identity mismatch: {source}")
         if parent["experiment"] != "unaided" or parent["seed"] != metadata["source_seed"]:
             raise ValueError(f"source is not the selected unaided seed: {source}")
-        snapshot, request = self._source_state(source, fork)
+        snapshot, _ = self._checkpoint(source, metadata["continue_at"], False)
         problem = self._load_problem(metadata)
-        if problem.statement not in snapshot["messages"][0]["content"]:
-            raise ValueError(f"current problem statement differs from saved solver input: {source}")
         oracle_indices = {item["solution_index"] for _, item in group if item["experiment"] == "continue-oracle"}
         if len(oracle_indices) > 1:
             raise ValueError("oracle branches from one prefix must use the same sketch")
-        solution_index = problem.select_solution_index(metadata["source_seed"], next(iter(oracle_indices), None))
-        solution = problem.solutions[solution_index]
-        branches: dict[str, list[BranchOutcome]] = {condition: [] for condition in CONDITIONS}
+        index = problem.select_solution_index(metadata["source_seed"], next(iter(oracle_indices), None))
+        records = []
         intervention = None
+        identities = set()
         for path, item in group:
-            outcome, first = self._branch(path, item, parent, snapshot)
-            branches[item["experiment"]].append(outcome)
-            if item["experiment"] == "continue-oracle":
-                candidate = self._oracle_intervention(first, snapshot, solution.sketch, path)
-                if intervention is not None and candidate != intervention:
+            identity = item["experiment"], item["seed"]
+            if identity in identities:
+                raise ValueError(f"duplicate branch: {path}")
+            identities.add(identity)
+            for name in ("temperature", "top_p", "top_k"):
+                if item["backend"][name] != parent["backend"][name]:
+                    raise ValueError(f"branch sampling differs from source: {path}")
+            record = self._build_record(path, item, index)
+            self._validate_source(record.messages, snapshot["messages"], path)
+            if record.oracle:
+                candidate = self._oracle_intervention(record.messages, snapshot["messages"], problem.solutions[index].sketch, path)
+                if intervention is not None and intervention != candidate:
                     raise ValueError(f"oracle branches have different injection messages: {path}")
                 intervention = candidate
-        key = f"{problem.competition}/{problem.year}/{problem.problem_id}"
-        records = []
-        for condition in CONDITIONS:
-            selected = branches[condition]
-            if not selected:
-                continue
-            oracle = condition == "continue-oracle"
-            messages = snapshot["messages"] + [intervention] if oracle else snapshot["messages"]
-            records.append(InputPrefix(prefix_id=f"{key}/{metadata['source_arm']}/{metadata['source_seed']}/{fork}/{condition}",
-                            oracle=oracle, problem_key=key,
-                            fork=fork, remaining_blocks=self.config.horizon - fork, split=self._split(key, problem.year),
-                            messages=messages, phase="solve" if oracle else request["phase"],
-                            response_finished=False if oracle else request["finish_reason"] == "stop", solution_index=solution_index,
-                            reference_solution=solution.solution, branches=selected))
+            records.append(record)
         return records
 
-    def _oracle_intervention(self, first: dict[str, Any], source: dict[str, Any],
+    def _build_record(self, path: Path, metadata: dict[str, Any], solution_index: int) -> InputPrefix:
+        """Read exactly one block after the fork and label it with that branch's future outcomes."""
+        fork = metadata["continue_at"] if metadata["experiment"] in CONDITIONS else 0
+        oracle = metadata["experiment"] in ORACLE_EXPERIMENTS
+        outcome = self._branch_outcome(path, metadata, fork)
+        snapshot, request = self._checkpoint(path, fork + 1, oracle)
+        problem = self._load_problem(metadata)
+        if problem.statement not in snapshot["messages"][0]["content"]:
+            raise ValueError(f"current problem statement differs from saved solver input: {path}")
+        solution = problem.solutions[solution_index]
+        if oracle and not fork:
+            if not any(message["role"] == "user" and solution.sketch in message["content"] for message in snapshot["messages"]):
+                raise ValueError(f"current sketch differs from saved intervention: {path}")
+        key = f"{problem.competition}/{problem.year}/{problem.problem_id}"
+        return InputPrefix(prefix_id=f"{outcome.path}/checkpoint_{fork + 1}x", oracle=oracle, problem_key=key,
+                           fork=fork, remaining_blocks=self.config.horizon - fork - 1,
+                           split=self._split(key, problem.year), messages=snapshot["messages"],
+                           phase=request["phase"], response_finished=request["finish_reason"] == "stop",
+                           solution_index=solution_index, reference_solution=solution.solution, branch=outcome)
+
+    def _validate_source(self, messages: list[dict[str, str]], prefix: list[dict[str, str]], path: Path) -> None:
+        """Allow an unfinished assistant response to extend, but never alter any source text."""
+        if (not prefix or len(messages) < len(prefix) or messages[:len(prefix) - 1] != prefix[:-1]
+                or messages[len(prefix) - 1]["role"] != prefix[-1]["role"]
+                or not messages[len(prefix) - 1]["content"].startswith(prefix[-1]["content"])):
+            raise ValueError(f"branch does not preserve source prefix: {path}")
+
+    def _oracle_intervention(self, messages: list[dict[str, str]], source: list[dict[str, str]],
                              sketch: str, path: Path) -> dict[str, str]:
-        """Extract the saved injection from the already-read checkpoint without changing the source history."""
-        if len(first["messages"]) <= len(source["messages"]):
+        """Check the saved injection while retaining the solver's response as critic input."""
+        if len(messages) <= len(source):
             raise ValueError(f"oracle branch has no injection message: {path}")
-        candidate = first["messages"][len(source["messages"])]
-        if first["messages"][:len(source["messages"])] != source["messages"]:
+        candidate = messages[len(source)]
+        if messages[:len(source)] != source:
             raise ValueError(f"oracle branch changed the pre-injection history: {path}")
         if candidate["role"] != "user" or sketch not in candidate["content"]:
             raise ValueError(f"current sketch differs from saved intervention: {path}")
         return candidate
 
-    def _source_state(self, source: Path, fork: int) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Recover the phase and natural-ending flag at the fork, never from the parent's final state."""
-        tokens = fork * OUTPUT_TOKENS_PER_BLOCK
-        snapshot = self._read_json(source / CHECKPOINT_FILENAME.format(k=fork))
-        state = RunState.model_validate(self._read_json(source / CONVERSATION_FILENAME))
+    def _checkpoint(self, path: Path, block: int, oracle: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Recover history and phase at the input boundary, excluding all later text and state."""
+        tokens = block * OUTPUT_TOKENS_PER_BLOCK
+        snapshot = self._read_json(path / CHECKPOINT_FILENAME.format(k=block))
+        state = RunState.model_validate(self._read_json(path / CONVERSATION_FILENAME))
         boundaries = [item for item in state.checkpoints if item.output_tokens == tokens]
         requests = [item for item in state.requests if item["output_tokens"] <= tokens]
         if len(boundaries) != 1 or not requests or requests[-1]["output_tokens"] != tokens:
-            raise ValueError(f"source conversation lacks the fork boundary: {source}")
+            raise ValueError(f"conversation lacks the input checkpoint boundary: {path}")
         boundary = boundaries[0]
         messages = [dict(item) for item in state.messages[:boundary.message_count]]
         messages[-1]["content"] = messages[-1]["content"][:boundary.last_message_chars]
-        if snapshot != {"messages": messages, "output_tokens": tokens} or any(item["injected"] for item in requests):
-            raise ValueError(f"source snapshot disagrees with unaided conversation: {source}")
+        if snapshot != {"messages": messages, "output_tokens": tokens}:
+            raise ValueError(f"snapshot disagrees with conversation: {path}")
+        if messages[-1]["role"] != "assistant" or requests[-1]["injected"] != oracle:
+            raise ValueError(f"input checkpoint lacks the expected solver response or oracle state: {path}")
+        if not oracle and any(item["injected"] for item in requests):
+            raise ValueError(f"unaided history contains a sketch injection: {path}")
         return snapshot, requests[-1]
 
-    def _branch(self, path: Path, metadata: dict[str, Any], parent: dict[str, Any],
-                source: dict[str, Any]) -> tuple[BranchOutcome, dict[str, Any]]:
-        """Reject incomplete audits, sampling mismatches, and branches that do not share the source text."""
-        for key in ("temperature", "top_p", "top_k"):
-            if metadata["backend"][key] != parent["backend"][key]:
-                raise ValueError(f"branch sampling differs from source: {path}")
-        fork = metadata["continue_at"]
-        snapshot = self._read_json(path / CHECKPOINT_FILENAME.format(k=fork + 1))
-        if snapshot["output_tokens"] != (fork + 1) * OUTPUT_TOKENS_PER_BLOCK:
-            raise ValueError(f"wrong first branch checkpoint boundary: {path}")
-        messages = snapshot["messages"]
-        prefix = source["messages"]
-        if (not prefix or len(messages) < len(prefix) or messages[:len(prefix) - 1] != prefix[:-1]
-                or messages[len(prefix) - 1]["role"] != prefix[-1]["role"]
-                or not messages[len(prefix) - 1]["content"].startswith(prefix[-1]["content"])):
-            raise ValueError(f"branch does not preserve source prefix: {path}")
+    def _branch_outcome(self, path: Path, metadata: dict[str, Any], fork: int) -> BranchOutcome:
+        """Require completed audits and retain only outcomes strictly after the critic input."""
         audit = self._read_json(path / AUDIT_FILENAME)
         if audit["complete"] is not True or audit["output_tokens"] != self.config.horizon * OUTPUT_TOKENS_PER_BLOCK:
             raise ValueError(f"incomplete branch audit: {path}")
@@ -182,8 +212,8 @@ class DatasetProcessor:
         if set(audit["checkpoints"]) != set(expected):
             raise ValueError(f"missing or unexpected audit checkpoints: {path}")
         return BranchOutcome(seed=metadata["seed"],
-                             outcomes=[audit["checkpoints"][k]["correctness"]["score"] for k in expected],
-                             path=str(path.relative_to(self.config.outputs_directory))), snapshot
+                             outcomes=[audit["checkpoints"][k]["correctness"]["score"] for k in expected[1:]],
+                             path=str(path.relative_to(self.config.outputs_directory)))
 
     def _split(self, key: str, year: int) -> Literal["train", "validation", "test"]:
         """Keep the held-out year untouched and split older problems before expanding prefixes."""

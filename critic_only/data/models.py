@@ -32,7 +32,7 @@ class BranchOutcome(BaseModel):
 
 
 class InputPrefix(BaseModel):
-    """One actual solver history and the outcomes of branches continuing that history."""
+    """One branch history after its first block, with its own subsequent outcomes."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     prefix_id: str
@@ -46,16 +46,11 @@ class InputPrefix(BaseModel):
     response_finished: bool
     solution_index: int = Field(ge=0)
     reference_solution: str | None
-    branches: list[BranchOutcome]
+    branch: BranchOutcome
 
     @model_validator(mode="after")
-    def validate_branches(self) -> "InputPrefix":
-        """Require unique independent branch identities and complete future outcome vectors."""
-        identities = [item.seed for item in self.branches]
-        if len(identities) != len(set(identities)):
-            raise ValueError(f"duplicate branch: {self.prefix_id}")
-        if not self.branches:
-            raise ValueError(f"history has no continuation branches: {self.prefix_id}")
-        if any(len(item.outcomes) != self.remaining_blocks for item in self.branches):
+    def validate_outcomes(self) -> "InputPrefix":
+        """Require one future grade per remaining block, excluding the observed input checkpoint."""
+        if len(self.branch.outcomes) != self.remaining_blocks:
             raise ValueError(f"incomplete future outcome vector: {self.prefix_id}")
         return self

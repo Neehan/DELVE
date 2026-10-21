@@ -2,19 +2,19 @@
 
 Learn to predict whether a frozen solver's final answer will be correct after using its remaining self-refinement budget. These experiments train only the critic; they generate no new solver trajectories.
 
-1. **Setup:** Read saved `continue` and `continue-oracle` branches and their audits. For example, a prefix at 2× with eight branches continued to 5× becomes one example with three blocks remaining. If three branches finish correctly, its label is `[3 successes, 8 trials]`. Earlier correct answers do not count if the final answer is wrong. Unaided and sketch-injected histories become separate examples; future branch text never enters the input.
-2. **Input and prediction:** The model's chat template places critic instructions in the system message and the saved trajectory in the user message. One transformer forward reads the whole input; its last non-padding hidden state produces one scalar probability of final-budget success. The critic does not generate an answer as text.
-3. **Training:** Initialize from the solver's model and train LoRA adapters plus prediction heads using binary outcome likelihood from the counts. When a matching reference solution exists, also encode a second view with that solution in the system message, explicitly unavailable to the solver. Average the two losses, not the predictions. The reference follows the solution selection recorded during collection.
+1. **Setup:** Each branch becomes a separate example after 1× of continuation. A fork at 2×, optional sketch injection, and 1× of solver reasoning gives an input at 3× with two blocks remaining in a 5× run. Eight branches give eight inputs, each labeled by its own final correct/incorrect answer. Full-budget `unaided` and `oracle-execution` runs injected at 0× supply the problem-only fork; `continue` and `continue-oracle` supply later forks. For a 5× budget, use forks at 0×–3×; the next block after a 4× fork is already terminal and is excluded.
+2. **Input and prediction:** The model's chat template places critic instructions in the system message and the saved history in the user message, including the sketch and the solver's response when present. One forward pass maps the last non-padding hidden state to one probability of final-budget correctness. Later text and audit grades never enter the input; a correct intermediate answer can still finish incorrectly.
+3. **Training:** Initialize from the solver's model and train LoRA adapters plus prediction heads with binary cross-entropy. Labels retain the count format `[final outcome, 1]`; sibling outcomes are not pooled. When a matching reference solution exists, also encode a privileged view with that solution in the system message, explicitly unavailable to the solver. Average the two losses, not predictions. References follow the saved oracle solution selection or the collection's seed-based round robin.
 
 | Variant / class | Training histories | Prediction |
 |---|---|---|
-| `ppo-critic` / `PPOCritic` | Unaided only | Direct scalar head |
-| `ppo-oracle-critic` / `PPOOracleCritic` | Unaided and sketch-injected | Same direct scalar head |
-| `de-critic` / `DECritic` | Unaided and sketch-injected | Discovery–execution formula evaluated at the remaining budget |
+| `ppo-critic` / `PPOCritic` | Unaided branch histories | Direct scalar head |
+| `ppo-oracle-critic` / `PPOOracleCritic` | Unaided and oracle branch histories | Same direct scalar head |
+| `de-critic` / `DECritic` | Unaided and oracle branch histories | Discovery–execution formula evaluated at the remaining budget |
 
-DE learns discovery and execution parameters internally, but only its final scalar is supervised. Compare it with `ppo-oracle-critic` to test the structural prior under the same supervision.
+DE reads the actual continuation and learns discovery and execution parameters internally. Oracle histories use the execution prediction; unaided histories use the discovery–execution mixture. Only final correctness supervises the scalar; there is no Bayesian update. Compare PPOCritic with PPOOracleCritic for oracle supervision, then PPOOracleCritic with DECritic for DE structure on the same data.
 
-Setup saves Parquet and pretokenized Arrow under `data/critic_only/`; training reuses those tokens each epoch. For local outputs, replace `--outputs-repo ... --revision ...` with `--outputs-directory <path>`. Problems from 2026 onward are test-only. Older problems split approximately 80/20 into train/validation with seed 1234, keeping every example of a problem together. `--oracle-supervision-fraction` limits the fraction of training problems contributing oracle examples.
+Setup saves Parquet and pretokenized Arrow under `data/critic_only/`; training reuses those tokens each epoch. Rebuild older pooled-prefix caches into a new `--destination` before using this setup. For local outputs, replace `--outputs-repo ... --revision ...` with `--outputs-directory <path>`. Problems from 2026 onward are test-only. Older problems split approximately 80/20 into train/validation with seed 1234, keeping every example of a problem together. `--oracle-supervision-fraction` limits the fraction of training problems contributing oracle examples.
 
 Install separately from vLLM, process once with matching local problems in `data/datasets/`, then train on two GPUs:
 
@@ -26,7 +26,7 @@ for variant in ppo-critic ppo-oracle-critic de-critic; do
 done
 ```
 
-GPU training uses FlashAttention-2 and BF16; install a compatible FlashAttention-2 kernel in the training environment. Defaults use LoRA rank 32, one prefix per GPU, gradient accumulation 8, and gradient checkpointing. Adjust `--batch-size` and `--accumulation-steps` to fit memory. Training logs metrics and saves resumable epoch checkpoints; use `--resume <checkpoint-directory>` after interruption.
+GPU training uses FlashAttention-2 and BF16; install a compatible FlashAttention-2 kernel in the training environment. Defaults use LoRA rank 32, one branch history per GPU, gradient accumulation 8, and gradient checkpointing. Adjust `--batch-size` and `--accumulation-steps` to fit memory. Training logs metrics and saves resumable epoch checkpoints; use `--resume <checkpoint-directory>` after interruption.
 
 Every epoch evaluates unaided validation histories. The best checkpoint minimizes final-outcome NLL without references, averaged per problem, and is saved under `best/`. After choosing settings on validation, evaluate the held-out test set:
 
