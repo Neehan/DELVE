@@ -11,7 +11,7 @@ from safetensors.torch import load_file, save_file
 from scipy.special import logit
 from transformers import EvalPrediction, PreTrainedTokenizerFast
 
-from critic_only.constants import MODEL_FILENAME, PROBABILITY_EPSILON
+from critic_only.constants import MODEL_FILENAME
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
@@ -142,9 +142,12 @@ def test_checkpoint_selection_matches_problem_macro_report() -> None:
     assert selected_scores[1] < selected_scores[0]
 
 
-@pytest.mark.parametrize("confidence", [-30.0, 30.0])
-def test_de_bfloat16_extremes_remain_finite(confidence: float, critic_settings: Callable[[str], CriticConfig]) -> None:
-    """BF16 saturation must not create infinite logits or NaN gradients in the DE prior."""
+@pytest.mark.parametrize("confidence", [-1000.0, -30.0, 30.0, 1000.0])
+@pytest.mark.parametrize("oracle", [False, True])
+@pytest.mark.parametrize("remaining", [1, 2])
+def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, remaining: int,
+                                          critic_settings: Callable[[str], CriticConfig]) -> None:
+    """Extreme finite logits must retain learning signals without probability clamps, for both history types."""
     model = DECritic.create_from_pretrained(critic_settings("de-critic"), torch.float32)
     with torch.no_grad():
         model.acquisition.weight.zero_()
@@ -152,13 +155,17 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, critic_settings: 
         model.execution.weight.zero_()
         model.execution.bias.fill_(confidence)
     counts = torch.tensor([[1., 2.]])
+    condition = torch.tensor([oracle])
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        prediction = model.predict(torch.zeros(1, model.hidden_size), torch.tensor([False]), torch.tensor([2]))
-        loss = model.loss(prediction, counts, torch.tensor([False])).mean()
+        prediction = model.predict(torch.zeros(1, model.hidden_size), condition, torch.tensor([remaining]))
+        loss = model.loss(prediction, counts, condition).mean()
     assert torch.isfinite(prediction).all()
     assert torch.isfinite(loss)
     loss.backward()
     assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters() if parameter.grad is not None)
+    assert model.execution.bias.grad is not None and model.execution.bias.grad.abs().sum() > 0
+    if oracle:
+        torch.testing.assert_close(prediction, torch.tensor([confidence]))
 
 
 @pytest.mark.parametrize("horizon", [2, 3, 5, 8])
@@ -180,7 +187,7 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
         for delay in range(end + 1):
             value = value + (1 - discovered) * alpha * (1 - alpha).pow(delay) * epsilon[:, end - delay]
         curve.append(value)
-    prior = torch.stack(curve, dim=-1).clamp(PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON)
+    prior = torch.stack(curve, dim=-1)
     expected = torch.logit(prior)[torch.arange(len(remaining)), remaining - 1]
     actual = prediction
     assert actual.dtype == torch.float32
