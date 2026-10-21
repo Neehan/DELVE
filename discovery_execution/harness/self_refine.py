@@ -59,15 +59,14 @@ class SelfRefine:
         """Select the sketch, validate metadata, and restore saved progress or the source prefix."""
         oracle = self.config.experiment in ORACLE_EXPERIMENTS
         solution_index = self.config.solution_index
-        if solution_index is None:
-            sketch_seed = self.config.source_seed if self.config.source_seed is not None else self.seed
-            solution_index = sketch_seed % len(self.problem.solutions) if oracle else UNAIDED_SOLUTION_INDEX
-            if (self.storage.directory / META_FILENAME).exists():
-                solution_index = self.storage.read_metadata()["solution_index"]
+        if solution_index is None and (self.storage.directory / META_FILENAME).exists():
+            solution_index = self.storage.read_metadata()["solution_index"]
         if oracle:
-            if not 0 <= solution_index < len(self.problem.solutions):
-                raise ValueError(f"missing solution index for {self.problem.problem_id}")
+            sketch_seed = self.config.source_seed if self.config.source_seed is not None else self.seed
+            solution_index = self.problem.select_solution_index(sketch_seed, solution_index)
             self.sketch = self.problem.solutions[solution_index].sketch
+        elif solution_index is None:
+            solution_index = UNAIDED_SOLUTION_INDEX
         excluded = {"seeds", "batch_size", "output_directory"}
         if self.config.continue_at is None:
             excluded.update({"source_arm", "source_seed", "continue_at"})

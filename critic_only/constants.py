@@ -1,0 +1,46 @@
+"""Defaults for reproducible frozen-solver critic experiments."""
+
+from pathlib import Path
+
+TEST_YEAR = 2026
+DEFAULT_VALIDATION_FRACTION = 0.2
+DEFAULT_SEED = 1234
+DEFAULT_HORIZON = 5
+DEFAULT_LORA_RANK = 32
+DEFAULT_LORA_ALPHA = 64
+DEFAULT_LEARNING_RATE = 1e-4
+DEFAULT_EPOCHS = 3
+DEFAULT_BATCH_SIZE = 1
+DEFAULT_ACCUMULATION_STEPS = 8
+DEFAULT_MAX_LENGTH = 49_152
+DEFAULT_ORACLE_SUPERVISION_FRACTION = 1.0
+DEFAULT_ORACLE_WEIGHT = 1.0
+DEFAULT_ATTENTION = "flash_attention_2"
+CPU_ATTENTION = "sdpa"
+PAIRED_INPUT_WEIGHT = 0.5
+DEFAULT_VARIANT = "ordinary"
+DEFAULT_WARMUP_RATIO = 0.05
+DEFAULT_WEIGHT_DECAY = 0.01
+DEFAULT_LOGGING_STEPS = 10
+PROBABILITY_EPSILON = 1e-6
+HASH_SCALE = 2**256
+SPLITS = ("train", "validation", "test")
+VARIANTS = ("ordinary", "oracle-supervised", "de")
+CONDITIONS = ("continue", "continue-oracle")
+# Final count axis: [successful branches, total branches].
+SUCCESS_COUNT_INDEX = 0
+TRIAL_COUNT_INDEX = 1
+OUTCOME_COUNT_FIELDS = 2
+DE_STATE_FIELDS = 2
+VALUE_OUTPUT_SIZE = 1
+PROCESSING_DIRECTORY = Path("data/critic_only")
+PREPARED_SUBDIRECTORY = "prepared"
+TOKENIZED_SUBDIRECTORY = "tokenized"
+TOKENIZED_DIRECTORY = PROCESSING_DIRECTORY / TOKENIZED_SUBDIRECTORY
+TRAINING_DIRECTORY = Path("output/critic_only")
+MODEL_FILENAME = "critic.safetensors"
+CONFIG_FILENAME = "critic.json"
+MANIFEST_FILENAME = "manifest.json"
+TRAINING_ARGS_FILENAME = "training_args.json"
+CRITIC_PROMPT_PATH = Path(__file__).parent / "prompts" / "critic.md"
+REFERENCE_PROMPT_PATH = CRITIC_PROMPT_PATH.parent / "reference.md"

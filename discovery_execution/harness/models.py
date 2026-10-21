@@ -43,6 +43,15 @@ class Problem(BaseModel):
     final_answer: str
     solutions: list[Solution]
 
+    def select_solution_index(self, seed: int, solution_index: int | None) -> int:
+        """Use the explicit/saved index, otherwise round robin by trajectory or source seed."""
+        if seed < 0:
+            raise ValueError("solution-selection seed must be nonnegative")
+        index = seed % len(self.solutions) if solution_index is None else solution_index
+        if not 0 <= index < len(self.solutions):
+            raise ValueError(f"missing solution index for {self.problem_id}")
+        return index
+
     @model_validator(mode="after")
     def validate_problem(self) -> "Problem":
         """Validate identity, supported partition, and reference availability."""
