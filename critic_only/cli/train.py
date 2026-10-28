@@ -1,31 +1,29 @@
-"""Train matched LoRA critics with Hugging Face Trainer on cached prefixes."""
+"""Train matched MLP critics with Hugging Face Trainer on cached frozen-model vectors."""
 
 import argparse
 import hashlib
 import json
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import torch
-from datasets import DatasetDict, load_from_disk
 from datasets.utils import disable_progress_bars
 from dotenv import load_dotenv
-from transformers import AutoConfig, AutoTokenizer, TrainingArguments, set_seed
+from transformers import TrainingArguments, set_seed
 
 from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
-    DEFAULT_ACCUMULATION_STEPS, DEFAULT_BATCH_SIZE,
-    DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE, DEFAULT_LOGGING_STEPS, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK,
-    DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT,
-    DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
-    MANIFEST_FILENAME, TOKENIZED_DIRECTORY, TRAINING_DIRECTORY, VARIANTS,
+    DEFAULT_ACCUMULATION_STEPS, DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE,
+    DEFAULT_LOGGING_STEPS, DEFAULT_HIDDEN_SIZE, DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED,
+    DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
+    TRAINING_DIRECTORY, VARIANTS, DEFAULT_ORACLE_SUPERVISION_FRACTION,
 )
-from critic_only.data.processor import select_training_problems, select_unaided_examples
-from critic_only.data.tokenizer import PrefixTokenizer
+from discovery_execution.processing.constants import MANIFEST_FILENAME
+from critic_only.data.processor import select_training_problems, select_unaided_examples, selection_fraction
+from critic_only.data.features import FeatureDataset, collate_features, load_feature_splits
 from critic_only.eval.metrics import compute_metrics
-from critic_only.models.loader import create_critic_from_pretrained
+from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
 from critic_only.trainer.base_trainer import BaseTrainer
 
@@ -33,11 +31,11 @@ from critic_only.trainer.base_trainer import BaseTrainer
 def parse_arguments() -> argparse.Namespace:
     """Expose experiment choices without reimplementing distributed launch configuration."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=TOKENIZED_DIRECTORY)
+    parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=TRAINING_DIRECTORY)
     parser.add_argument("--variant", choices=VARIANTS, default=DEFAULT_VARIANT)
-    parser.add_argument("--rank", type=int, default=DEFAULT_LORA_RANK)
-    parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
+    parser.add_argument("--hidden-size", type=int, default=DEFAULT_HIDDEN_SIZE)
+    parser.add_argument("--oracle-supervision-fraction", type=float, default=DEFAULT_ORACLE_SUPERVISION_FRACTION)
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
     parser.add_argument("--training-problem-fraction", type=float, default=DEFAULT_TRAINING_PROBLEM_FRACTION,
                         help="fraction of training problems to retain for ablations; validation/test stay unchanged")
@@ -48,10 +46,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--logging-steps", type=int, default=DEFAULT_LOGGING_STEPS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--cpu", action="store_true", help="float32 CPU smoke tests only")
+    parser.add_argument("--cpu", action="store_true", help="train the small MLP on CPU")
     args = parser.parse_args()
     if min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
         parser.error("training sizes and learning rate must be positive")
+    if args.hidden_size <= 0 or args.oracle_weight < 0 or not 0 <= args.oracle_supervision_fraction <= 1:
+        parser.error("invalid MLP size, oracle weight, or oracle-supervision-fraction")
     if not 0 < args.training_problem_fraction <= 1:
         parser.error("--training-problem-fraction must be in (0, 1]")
     return args
@@ -62,14 +62,14 @@ def training_arguments(args: argparse.Namespace) -> TrainingArguments:
     return TrainingArguments(output_dir=str(args.output), num_train_epochs=args.epochs,
                              learning_rate=args.learning_rate, per_device_train_batch_size=args.batch_size,
                              per_device_eval_batch_size=args.batch_size, gradient_accumulation_steps=args.accumulation_steps,
-                             bf16=not args.cpu, use_cpu=args.cpu, optim="adamw_torch" if args.cpu else "adamw_torch_fused",
+                             bf16=False, use_cpu=args.cpu, optim="adamw_torch" if args.cpu else "adamw_torch_fused",
                              warmup_steps=DEFAULT_WARMUP_RATIO, weight_decay=DEFAULT_WEIGHT_DECAY,
                              eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False,
                              logging_strategy="steps", logging_steps=args.logging_steps, logging_first_step=True,
                              disable_tqdm=True, report_to="none", seed=args.seed,
                              remove_unused_columns=False, label_names=["labels"],
-                             train_sampling_strategy="group_by_length", ddp_find_unused_parameters=False)
+                             ddp_find_unused_parameters=False)
 
 
 def validate_training_run(args: argparse.Namespace, manifest: bytes, settings: CriticConfig, world_size: int) -> dict[str, Any]:
@@ -79,7 +79,7 @@ def validate_training_run(args: argparse.Namespace, manifest: bytes, settings: C
     options["world_size"] = world_size
     record = {"options": options, "critic": settings.model_dump(), "cache_sha256": hashlib.sha256(manifest).hexdigest()}
     cache = json.loads(manifest)
-    record["data"] = {"tokenization": cache["settings"], "preparation": cache["preparation"]["settings"]}
+    record["data"] = {"tokenization": cache["tokenization"]["settings"], "feature_signature": cache["features"]["signature"]}
     path = args.output / "training.json"
     if args.resume is not None:
         if not args.resume.is_dir():
@@ -101,17 +101,17 @@ def main() -> None:
     args = parse_arguments()
     set_seed(args.seed)
     manifest_bytes = (args.data / MANIFEST_FILENAME).read_bytes()
-    manifest = json.loads(manifest_bytes)
-    cached = manifest["settings"]
+    dataset, manifest = load_feature_splits(args.data, ("train", "validation"))
+    cached = manifest["tokenization"]["settings"]
     settings = CriticConfig(model=cached["model"], revision=cached["revision"], variant=args.variant,
-                            horizon=manifest["preparation"]["settings"]["horizon"], lora_rank=args.rank,
-                            lora_alpha=args.lora_alpha, oracle_weight=args.oracle_weight)
-    dataset = cast(DatasetDict, load_from_disk(str(args.data)))
+                            horizon=cached["horizon"], input_size=manifest["features"]["settings"]["hidden_size"],
+                            hidden_size=args.hidden_size, feature_signature=manifest["features"]["signature"],
+                            oracle_weight=args.oracle_weight)
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
     dataset["train"] = select_training_problems(dataset["train"], args.training_problem_fraction)
-    if args.variant != "ppo-critic" and cached["oracle_supervision_fraction"] == 0:
-        raise ValueError("PPOOracleCritic and DECritic require nonzero oracle coverage")
+    dataset["train"] = dataset["train"].filter(lambda row: not row["oracle"] or
+        selection_fraction(f"oracle:{row['problem_key']}", DEFAULT_SEED) < args.oracle_supervision_fraction)
     if args.variant != "ppo-critic" and not any(dataset["train"]["oracle"]):
         raise ValueError("no training prefix has oracle outcomes under this coverage selection")
     if args.variant == "ppo-critic":
@@ -119,13 +119,9 @@ def main() -> None:
     dataset["validation"] = select_unaided_examples(dataset["validation"])
     training = training_arguments(args)
     record = validate_training_run(args, manifest_bytes, settings, training.world_size) if training.process_index == 0 else None
-    model_config = AutoConfig.from_pretrained(settings.model, revision=settings.revision)
-    if cached["max_length"] > model_config.get_text_config().max_position_embeddings:
-        raise ValueError("cached maximum length exceeds the critic model's context limit")
-    tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
-    model = create_critic_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
-    trainer = BaseTrainer(model=model, args=training, data_collator=PrefixTokenizer(tokenizer).pad_batch,
-                          train_dataset=dataset["train"], eval_dataset=dataset["validation"],
+    model = create_critic(settings)
+    trainer = BaseTrainer(model=model, args=training, data_collator=collate_features,
+                          train_dataset=FeatureDataset(dataset["train"]), eval_dataset=FeatureDataset(dataset["validation"]),
                           compute_metrics=partial(compute_metrics, problem_keys=list(dataset["validation"]["problem_key"])))
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():

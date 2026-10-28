@@ -12,13 +12,13 @@ from critic_only.models.models import CriticConfig
 class DECritic(BaseCritic):
     """Learn whether a strategy is discovered, future discovery, and execution; latent parameters are not strategy labels."""
 
-    def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
+    def __init__(self, settings: CriticConfig) -> None:
         """Keep the execution curve unrestricted to allow correct-to-incorrect revisions."""
-        super().__init__(model, hidden_size, settings)
+        super().__init__(settings)
         self.horizons = settings.horizon - 1
-        self.strategy_discovered = nn.Linear(hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
-        self.discovery = nn.Linear(hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
-        self.execution = nn.Linear(hidden_size, self.horizons, dtype=torch.float32)
+        self.strategy_discovered = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
+        self.discovery = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
+        self.execution = nn.Linear(settings.hidden_size, self.horizons, dtype=torch.float32)
 
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Return the DE value at each history's remaining budget, or its execution value for oracle histories.

@@ -16,7 +16,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
-from critic_only.data.models import PreparationConfig
+from critic_only.tests.models import CollectionFixture
 from critic_only.models.models import CriticConfig
 
 
@@ -37,7 +37,7 @@ def tokenizer() -> PreTrainedTokenizerFast:
 
 @pytest.fixture
 def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
-    """Save a real tiny Qwen3 model so PEFT construction and checkpointing use actual APIs."""
+    """Save a real tiny Qwen3 model for extraction tests; MLP settings remain independent of model loading."""
     directory = tmp_path / "model"
     torch.manual_seed(7)
     config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
@@ -47,7 +47,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
     def create(variant: str) -> CriticConfig:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
-                                                lora_rank=2, lora_alpha=4,
+                                                input_size=16, hidden_size=16, feature_signature="test-signature",
                                                 oracle_weight=1))
 
     return create
@@ -78,7 +78,7 @@ def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[st
 
 
 @pytest.fixture
-def prepared_inputs(tmp_path: Path) -> PreparationConfig:
+def prepared_inputs(tmp_path: Path) -> CollectionFixture:
     """Save root and forked runs with distinct observed reasoning and later correct-to-incorrect revisions."""
     root = tmp_path / "outputs"
     references = tmp_path / "datasets" / "aime"
@@ -105,9 +105,11 @@ def prepared_inputs(tmp_path: Path) -> PreparationConfig:
                 observed = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed}"}]
                 final = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed} FINAL FUTURE"}]
                 write_run(branch, metadata, [observed, final], [1, seed])
-    return PreparationConfig(outputs_directory=root, datasets_directory=references.parent, destination=tmp_path / "prepared",
-                             solver_model="tiny", horizon=3, validation_fraction=0.2,
-                             split_seed=42, source_revision="fixture")
+    extra = {**json.loads((references / "2025.jsonl").read_text()), "problem_id": "AIME-2025-I-2"}
+    with (references / "2025.jsonl").open("a") as file:
+        file.write(json.dumps(extra) + "\n")
+    return CollectionFixture(outputs_directory=root, datasets_directory=references.parent, destination=tmp_path / "prepared",
+                             solver_model="tiny", horizon=3)
 
 
 @pytest.fixture
@@ -124,7 +126,7 @@ def replace_saved_text() -> Callable[[Path, str, str], None]:
 
 
 @pytest.fixture
-def training_rows() -> list[dict[str, Any]]:
+def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
@@ -132,3 +134,12 @@ def training_rows() -> list[dict[str, Any]]:
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
              "oracle": False, "remaining_blocks": 1, "labels": 1}]
+
+
+@pytest.fixture
+def training_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use fixed vectors with one missing reference to exercise paired loss weighting."""
+    return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
+             "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
+             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"]}
+            for index, row in enumerate(token_rows)]

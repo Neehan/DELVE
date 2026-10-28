@@ -11,10 +11,10 @@ from critic_only.models.models import CriticConfig
 class PPOCritic(BaseCritic):
     """Predict success from the supplied history; PPOOracleCritic shares this same head."""
 
-    def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
+    def __init__(self, settings: CriticConfig) -> None:
         """Use identical head capacity for the PPOCritic and PPOOracleCritic baselines."""
-        super().__init__(model, hidden_size, settings)
-        self.head = nn.Linear(hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
+        super().__init__(settings)
+        self.head = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
 
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Return one terminal logit; remaining budget is already included in the encoded prompt."""

@@ -52,7 +52,7 @@ class BaseTrainer(Trainer):
         """
         labels = inputs.pop("labels")
         indices = inputs.pop("privileged_indices")
-        logits = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], oracle=inputs["oracle"],
+        logits = model(hidden_state=inputs["hidden_state"], oracle=inputs["oracle"],
                        remaining_blocks=inputs["remaining_blocks"])
         unprivileged_logits = logits[:len(labels)]
         oracle = inputs["oracle"][:len(labels)]
@@ -74,7 +74,7 @@ class BaseTrainer(Trainer):
         return loss
 
     def _save(self, *args: Any, **kwargs: Any) -> None:
-        """Store adapters and heads only; distributed sharded saves are deliberately unsupported here."""
+        """Store the complete MLP critic; distributed sharded saves are deliberately unsupported here."""
         output_dir = args[0] if args else kwargs.get("output_dir", self.args.output_dir)
         directory = Path(output_dir)
         cast(BaseCritic, self.accelerator.unwrap_model(self.model)).save(directory)

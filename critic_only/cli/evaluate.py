@@ -3,23 +3,23 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
-import torch
-from datasets import Dataset, DatasetDict, load_from_disk
+from datasets import Dataset
 from datasets.utils import disable_progress_bars
 from scipy.special import expit
-from transformers import AutoTokenizer, TrainingArguments
+from transformers import TrainingArguments
 from transformers.trainer_utils import PredictionOutput
 
 from transformers.utils.logging import disable_progress_bar
 
-from critic_only.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE, MANIFEST_FILENAME, SPLITS, TOKENIZED_DIRECTORY
-from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE
+from discovery_execution.processing.constants import SPLITS
+from critic_only.data.features import FeatureDataset, collate_features, load_feature_splits
 from critic_only.data.processor import select_unaided_examples
 from critic_only.eval.metrics import evaluation_report
-from critic_only.models.loader import create_critic_from_pretrained
+from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
 from critic_only.trainer.base_trainer import BaseTrainer
 
@@ -50,7 +50,7 @@ def main() -> None:
     disable_progress_bars()
     disable_progress_bar()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=TOKENIZED_DIRECTORY)
+    parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--split", choices=SPLITS, required=True)
@@ -62,20 +62,17 @@ def main() -> None:
     if args.destination.exists():
         raise FileExistsError(args.destination)
     settings = CriticConfig.model_validate_json((args.checkpoint / CONFIG_FILENAME).read_text())
-    cache = json.loads((args.data / MANIFEST_FILENAME).read_text())
-    if (cache["settings"]["model"], cache["settings"]["revision"]) != (settings.model, settings.revision):
-        raise ValueError("evaluation cache uses a different model/tokenizer revision")
-    if cache["preparation"]["settings"]["horizon"] != settings.horizon:
-        raise ValueError("evaluation horizon differs from training")
-    dataset = select_unaided_examples(cast(DatasetDict, load_from_disk(str(args.data)))[args.split])
-    model = create_critic_from_pretrained(settings, torch.float32 if args.cpu else torch.bfloat16)
+    datasets, cache = load_feature_splits(args.data, (args.split,))
+    if cache["features"]["signature"] != settings.feature_signature:
+        raise ValueError("evaluation features differ from training")
+    dataset = select_unaided_examples(datasets[args.split])
+    model = create_critic(settings)
     model.load_from_weights(args.checkpoint)
-    tokenizer = AutoTokenizer.from_pretrained(args.data / "tokenizer", padding_side="right")
-    training = TrainingArguments(output_dir=str(args.destination), use_cpu=args.cpu, bf16=not args.cpu,
+    training = TrainingArguments(output_dir=str(args.destination), use_cpu=args.cpu, bf16=False,
                                  per_device_eval_batch_size=args.batch_size, remove_unused_columns=False,
                                  label_names=["labels"], report_to="none", disable_tqdm=True)
-    trainer = BaseTrainer(model=model, args=training, data_collator=PrefixTokenizer(tokenizer).pad_batch)
-    result = trainer.predict(cast(Any, dataset))
+    trainer = BaseTrainer(model=model, args=training, data_collator=collate_features)
+    result = trainer.predict(FeatureDataset(dataset))
     if trainer.is_world_process_zero():
         save_evaluation(result, dataset, args)
 

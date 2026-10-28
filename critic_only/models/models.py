@@ -8,13 +8,14 @@ from discovery_execution.harness.constants import MAX_BLOCKS
 
 
 class CriticConfig(BaseModel):
-    """Pin the model and adapter capacity independently of the prediction variant."""
+    """Describe a feature cache and matched MLP capacity for one prediction variant."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     model: str
     revision: str
     variant: Literal["ppo-critic", "ppo-oracle-critic", "de-critic"]
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
-    lora_rank: int = Field(gt=0)
-    lora_alpha: int = Field(gt=0)
+    input_size: int = Field(gt=0)
+    hidden_size: int = Field(gt=0)
+    feature_signature: str
     oracle_weight: float = Field(ge=0)

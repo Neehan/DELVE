@@ -1,21 +1,22 @@
-"""Compile audited DELVE branches once into portable, problem-disjoint Parquet splits."""
+"""Select verified post-continuation histories and their terminal labels from shared trajectory shards."""
 
 import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any, Literal, cast
+from typing import Any
+from collections.abc import Iterator
 
-import zstandard
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONTINUATION_EXPERIMENTS, CONVERSATION_FILENAME,
+    AUDIT_FILENAME, CONTINUATION_EXPERIMENTS, CONVERSATION_FILENAME,
     META_FILENAME, ORACLE_EXPERIMENTS, OUTPUT_TOKENS_PER_BLOCK,
 )
 from discovery_execution.harness.models import Problem, RunState
-from critic_only.constants import DEFAULT_SEED, HASH_SCALE, MANIFEST_FILENAME, SPLITS, TEST_YEAR
+from critic_only.constants import DEFAULT_SEED, HASH_SCALE
+from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLIT_FILENAME
+from discovery_execution.processing.storage import checkpoint_snapshot, file_digest
 from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfig
 
 
@@ -66,75 +67,70 @@ def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
     return dataset.select([index for index, key in enumerate(problem_keys) if key in selected])
 
 
-class DatasetProcessor:
-    """Validate audited branch histories and publish problem-disjoint splits through run()."""
+class CriticInputProcessor:
+    """Yield checked post-continuation histories and matching labels through iter_inputs()."""
 
     def __init__(self, config: PreparationConfig) -> None:
-        """Keep preparation settings and the input checksums needed to reproduce this artifact."""
+        """Read a verified Parquet collection and index identities without materializing histories."""
         self.config = config
-        self.checksums: dict[str, str] = {}
-        self.problems: dict[tuple[str, int], dict[str, Problem]] = {}
+        self.manifest = json.loads((config.source_directory / MANIFEST_FILENAME).read_text())
+        if file_digest(config.source_directory.parent / SPLIT_FILENAME) != self.manifest["split_sha256"]:
+            raise ValueError("problem split assignments changed")
+        datasets = []
+        for name, digest in self.manifest["trajectories"].items():
+            path = config.source_directory / name
+            if file_digest(path) != digest:
+                raise ValueError(f"processed trajectory shard changed: {path}")
+            datasets.append(Dataset.from_parquet(str(path)))
+        self.dataset = concatenate_datasets(datasets)
+        identities = list(self.dataset["trajectory_id"])
+        if len(set(identities)) != len(identities):
+            raise ValueError("duplicate saved trajectory identities")
+        self.indices = {name: index for index, name in enumerate(identities)}
+        self.problem_indices = {key: index for index, key in enumerate(self.dataset["problem_key"])}
+        self.problems: dict[str, Problem] = {}
 
-    def run(self) -> None:
-        """Reject overwrites, group branches, and publish the full dataset only after validation."""
-        if self.config.destination.exists():
-            raise FileExistsError(self.config.destination)
+    def iter_inputs(self) -> Iterator[dict[str, Any]]:
+        """Yield one observed branch history and its own terminal label, keeping source groups together."""
         groups: dict[tuple[Any, ...], list[tuple[Path, dict[str, Any]]]] = defaultdict(list)
-        root_runs = []
         identities = set()
-        for path in sorted(self.config.outputs_directory.rglob(META_FILENAME)):
-            metadata = self._read_json(path)
-            if metadata["model"] != self.config.solver_model:
-                continue
+        for name, text in zip(self.dataset["trajectory_id"], self.dataset["metadata"]):
+            metadata = json.loads(text)
             fork = select_input_fork(metadata, self.config.horizon)
             if fork is None:
                 continue
-            problem_key = tuple(metadata[name] for name in ("competition", "year", "problem_id"))
+            problem_key = tuple(metadata[key] for key in ("competition", "year", "problem_id"))
             source_key = (metadata["source_arm"], metadata["source_seed"], fork) if fork else ()
             identity = (*problem_key, *source_key, metadata["experiment"], metadata["seed"])
             if identity in identities:
-                raise ValueError(f"duplicate saved trajectory: {path}")
+                raise ValueError(f"duplicate saved trajectory: {name}")
             identities.add(identity)
             if fork == 0:
-                root_runs.append((path.parent, metadata))
+                solution_index = metadata["solution_index"] if metadata["experiment"] in ORACLE_EXPERIMENTS else None
+                yield self._build_input(Path(name), metadata, solution_index).model_dump()
             else:
-                groups[problem_key + source_key].append((path.parent, metadata))
-        records = []
-        for path, metadata in root_runs:
-            solution_index = metadata["solution_index"] if metadata["experiment"] in ORACLE_EXPERIMENTS else None
-            records.append(self._build_input(path, metadata, solution_index))
-        records.extend(record for group in groups.values() for record in self._build_branch_inputs(group))
-        if not records:
-            raise ValueError("no matching trajectories with a nonterminal critic input")
-        self._publish(records)
+                groups[problem_key + source_key].append((Path(name), metadata))
+        for group in groups.values():
+            for record in self._build_branch_inputs(group):
+                yield record.model_dump()
 
     def _read_json(self, path: Path) -> Any:
-        """Read and fingerprint exactly the bytes used, without mutating collection artifacts."""
-        file_bytes = path.read_bytes()
-        self.checksums[str(path.resolve())] = hashlib.sha256(file_bytes).hexdigest()
-        if path.suffix == ".zst":
-            file_bytes = zstandard.decompress(file_bytes)
-        return json.loads(file_bytes)
+        """Read the exact serialized artifact preserved in its trajectory row."""
+        columns = {META_FILENAME: "metadata", CONVERSATION_FILENAME: "conversation", AUDIT_FILENAME: "audit"}
+        row = self.dataset[self.indices[str(path.parent)]]
+        return json.loads(row[columns[path.name]])
 
     def _load_problem(self, metadata: dict[str, Any]) -> Problem:
-        """Load each local reference partition once and keep its source checksum."""
-        key = metadata["competition"], metadata["year"]
+        """Use the reference frozen during setup, never a subsequently edited dataset file."""
+        key = f"{metadata['competition']}/{metadata['year']}/{metadata['problem_id']}"
         if key not in self.problems:
-            path = self.config.datasets_directory / key[0] / f"{key[1]}.jsonl"
-            dataset_bytes = path.read_bytes()
-            self.checksums[str(path.resolve())] = hashlib.sha256(dataset_bytes).hexdigest()
-            rows = [Problem.model_validate_json(line) for line in dataset_bytes.splitlines() if line.strip()]
-            if any((row.competition, row.year) != key for row in rows):
-                raise ValueError(f"problem partition disagrees with filename: {path}")
-            if len({row.problem_id for row in rows}) != len(rows):
-                raise ValueError(f"duplicate problem IDs: {path}")
-            self.problems[key] = {row.problem_id: row for row in rows}
-        return self.problems[key][metadata["problem_id"]]
+            self.problems[key] = Problem.model_validate_json(self.dataset[self.problem_indices[key]]["problem"])
+        return self.problems[key]
 
     def _build_branch_inputs(self, group: list[tuple[Path, dict[str, Any]]]) -> list[InputPrefix]:
         """Validate the common source, then retain each branch's own post-continuation history."""
         _, metadata = group[0]
-        root = self.config.outputs_directory / metadata["competition"] / str(metadata["year"]) / metadata["model"]
+        root = Path(metadata["competition"]) / str(metadata["year"]) / metadata["model"]
         source = root / metadata["source_arm"] / metadata["problem_id"] / f"seed_{metadata['source_seed']}"
         parent = self._read_json(source / META_FILENAME)
         for name in ("competition", "year", "problem_id", "model"):
@@ -181,7 +177,7 @@ class DatasetProcessor:
         key = f"{problem.competition}/{problem.year}/{problem.problem_id}"
         return InputPrefix(prefix_id=f"{outcome.path}/checkpoint_{fork + 1}x", oracle=oracle, problem_key=key,
                            fork=fork, remaining_blocks=self.config.horizon - fork - 1,
-                           split=self._split(key, problem.year), messages=snapshot["messages"],
+                           split=self.dataset[self.indices[str(path)]]["split"], messages=snapshot["messages"],
                            phase=request["phase"], response_finished=request["finish_reason"] == "stop",
                            solution_index=solution_index, reference_solution=solution.solution, branch=outcome)
 
@@ -207,7 +203,6 @@ class DatasetProcessor:
     def _read_checkpoint(self, path: Path, block: int, oracle: bool) -> tuple[dict[str, Any], dict[str, Any]]:
         """Recover history and phase at the input boundary, excluding all later text and state."""
         tokens = block * OUTPUT_TOKENS_PER_BLOCK
-        snapshot = self._read_json(path / CHECKPOINT_FILENAME.format(k=block))
         state = RunState.model_validate(self._read_json(path / CONVERSATION_FILENAME))
         if state.output_tokens < tokens:
             raise ValueError(f"checkpoint exceeds saved conversation progress: {path}")
@@ -215,11 +210,8 @@ class DatasetProcessor:
         requests = [item for item in state.requests if item["output_tokens"] <= tokens]
         if len(boundaries) != 1 or not requests or requests[-1]["output_tokens"] != tokens:
             raise ValueError(f"conversation lacks the input checkpoint boundary: {path}")
-        boundary = boundaries[0]
-        messages = [dict(item) for item in state.messages[:boundary.message_count]]
-        messages[-1]["content"] = messages[-1]["content"][:boundary.last_message_chars]
-        if snapshot != {"messages": messages, "output_tokens": tokens}:
-            raise ValueError(f"snapshot disagrees with conversation: {path}")
+        snapshot = checkpoint_snapshot(state, boundaries[0])
+        messages = snapshot["messages"]
         if messages[-1]["role"] != "assistant" or requests[-1]["injected"] != oracle:
             raise ValueError(f"input checkpoint lacks the expected solver response or oracle state: {path}")
         if not oracle and any(item["injected"] for item in requests):
@@ -236,28 +228,4 @@ class DatasetProcessor:
             raise ValueError(f"missing or unexpected audit checkpoints: {path}")
         return BranchOutcome(seed=metadata["seed"],
                              final_correctness=audit["checkpoints"][expected[-1]]["correctness"]["score"],
-                             path=str(path.relative_to(self.config.outputs_directory)))
-
-    def _split(self, key: str, year: int) -> Literal["train", "validation", "test"]:
-        """Keep the held-out year untouched and split older problems before expanding prefixes."""
-        if year >= TEST_YEAR:
-            return "test"
-        return "validation" if selection_fraction(key, self.config.split_seed) < self.config.validation_fraction else "train"
-
-    def _publish(self, records: list[InputPrefix]) -> None:
-        """Write shareable Parquet and a provenance manifest without publishing partial output."""
-        destination = self.config.destination
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(dir=destination.parent) as temporary:
-            staging = Path(temporary) / "prepared"
-            staging.mkdir()
-            counts = {}
-            for split in SPLITS:
-                rows = [row.model_dump() for row in records if row.split == split]
-                counts[split] = len(rows)
-                if rows:
-                    Dataset.from_list(cast(list[dict], rows)).to_parquet(str(staging / f"{split}.parquet"))
-            manifest = {"settings": self.config.model_dump(mode="json"), "prefix_counts": counts,
-                        "problem_count": len({row.problem_key for row in records}), "input_sha256": self.checksums}
-            (staging / MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2) + "\n")
-            staging.rename(destination)
+                             path=str(path))

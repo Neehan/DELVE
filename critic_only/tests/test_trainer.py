@@ -13,7 +13,7 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizerFast, TrainerCallback, TrainingArguments, set_seed
 from transformers.trainer_pt_utils import find_batch_size
 
-from critic_only.data.tokenizer import PrefixTokenizer
+from critic_only.data.features import collate_features
 from critic_only.eval.metrics import compute_metrics
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
@@ -39,7 +39,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
     """Use real Trainer accumulation, evaluation, and checkpoint selection on a tiny CPU model."""
     set_seed(17)
     critic_type = DECritic if settings.variant == "de-critic" else PPOOracleCritic if settings.variant == "ppo-oracle-critic" else PPOCritic
-    model = critic_type.create_from_pretrained(settings, torch.float32)
+    model = critic_type(settings)
     data = Dataset.from_list(rows)
     args = TrainingArguments(output_dir=str(directory), max_steps=4, per_device_train_batch_size=1,
                              per_device_eval_batch_size=1, gradient_accumulation_steps=2, learning_rate=1e-3,
@@ -48,7 +48,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                              logging_steps=1, disable_tqdm=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False, seed=17,
                              remove_unused_columns=False, label_names=["labels"], report_to="none")
-    return BaseTrainer(model=model, args=args, data_collator=PrefixTokenizer(tokenizer).pad_batch, train_dataset=data,
+    return BaseTrainer(model=model, args=args, data_collator=collate_features, train_dataset=data,
                        eval_dataset=data, compute_metrics=partial(compute_metrics, problem_keys=list(data["problem_key"])),
                        callbacks=callbacks)
 
@@ -100,27 +100,27 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
                                  training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Match independent per-example losses and gradients, including rows with missing references."""
     rows = [{**row, "oracle": variant != "ppo-critic" and index == 1,
-             "privileged_input_ids": row["input_ids"] + [3, 3] if present else None}
+             "privileged_hidden_state": [0.25] * 16 if present else None}
             for index, (row, present) in enumerate(zip(training_rows, references))]
     trainer = make_trainer(tmp_path / "run", critic_settings(variant), tokenizer, rows, [])
     model = cast(BaseCritic, trainer.model)
     model.eval()
     forward = Mock(wraps=model.forward)
     monkeypatch.setattr(model, "forward", forward)
-    batch = PrefixTokenizer(tokenizer).pad_batch(rows)
+    batch = collate_features(rows)
     assert find_batch_size(batch) == len(rows)
     actual, outputs = trainer.compute_loss(model, batch, return_outputs=True)
     assert forward.call_count == 1
     expected_losses = []
     for row in rows:
         labels = torch.tensor([row["labels"]], dtype=torch.float32)
-        views = [row["input_ids"]]
-        if row["privileged_input_ids"] is not None:
-            views.append(row["privileged_input_ids"])
+        views = [row["hidden_state"]]
+        if row["privileged_hidden_state"] is not None:
+            views.append(row["privileged_hidden_state"])
         losses = []
         for tokens in views:
             ids = torch.tensor([tokens])
-            prediction = model(input_ids=ids, attention_mask=torch.ones_like(ids), oracle=torch.tensor([row["oracle"]]),
+            prediction = model(hidden_state=ids, oracle=torch.tensor([row["oracle"]]),
                                remaining_blocks=torch.tensor([row["remaining_blocks"]]))
             losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
         expected_losses.append(torch.stack(losses).mean())

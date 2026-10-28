@@ -9,17 +9,11 @@ from discovery_execution.harness.constants import MAX_BLOCKS
 
 
 class PreparationConfig(BaseModel):
-    """Select a solver, budget, and deterministic problem-level split."""
+    """Select a processed collection and a terminal budget for critic inputs."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    outputs_directory: Path
-    datasets_directory: Path
-    destination: Path
-    solver_model: str
+    source_directory: Path
     horizon: int = Field(ge=2, le=MAX_BLOCKS)
-    validation_fraction: float = Field(gt=0, lt=1)
-    split_seed: int = Field(ge=0)
-    source_revision: str | None
 
 
 class BranchOutcome(BaseModel):
