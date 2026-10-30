@@ -1,18 +1,20 @@
 """Verify exact branch histories, reference selection, fixed splits, and cached input identity."""
 
 import json
+from typing import Any, cast
 
 import pytest
 import zstandard
-from datasets import Dataset, DatasetDict, load_from_disk
+from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
 from critic_only.data.models import PreparationConfig
-from critic_only.data.processor import CriticInputProcessor, select_input_fork, select_training_problems
+from critic_only.data.storage import CriticInputStorage
+from critic_only.data.critic_input_processor import CriticInputProcessor, select_input_fork, select_training_problems
 from critic_only.data.tokenizer import PrefixTokenizer, token_digest
 from critic_only.tests.models import CollectionFixture
-from discovery_execution.processing.processor import TrajectoryProcessor
-from discovery_execution.processing.splits import ProblemSplits
+from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
+from discovery_execution.processing.problem_splits import ProblemSplits
 
 
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
@@ -22,7 +24,8 @@ def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     return CriticInputProcessor(PreparationConfig(source_directory=config.destination, horizon=config.horizon))
 
 
-def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast) -> None:
+def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast,
+                                            encoding_settings: dict[str, Any]) -> None:
     """Keep shared full histories while tokenized critic inputs exclude all future reasoning and grades."""
     processor = compile_fixture(prepared_inputs)
     rows = list(processor.iter_inputs())
@@ -33,17 +36,22 @@ def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, 
     assert all(row["phase"] == "critique" and row["response_finished"] for row in branches)
     assert all(row["split"] == "test" for row in rows if "/2026/" in row["problem_key"])
     assert any("FINAL FUTURE" in text for text in processor.dataset["conversation"])
-    destination = prepared_inputs.destination / "critic_only" / "tokenized"
-    PrefixTokenizer(tokenizer).cache_tokens(processor, destination, {"max_length": 512})
-    cached = load_from_disk(str(destination))
-    assert isinstance(cached, DatasetDict)
-    assert len(cached["test"]) == 5
-    for row in cached["test"].to_list():
+    destination = prepared_inputs.destination
+    examples = Dataset.from_list(rows)
+    encoded = examples.map(PrefixTokenizer(tokenizer).encode, fn_kwargs={"settings": encoding_settings},
+                           remove_columns=examples.column_names)
+    storage = CriticInputStorage(destination)
+    shards = storage.save_inputs(encoded, tokenizer, encoding_settings)
+    test_paths = [str(destination / name) for name in shards if name.startswith("test/")]
+    cached = Dataset.from_parquet(cast(Any, test_paths))
+    assert len(cached) == 5
+    for row in cached.to_list():
         assert row["input_hash"] == token_digest(row["input_ids"])
         assert row["privileged_input_hash"] == token_digest(row["privileged_input_ids"])
         assert row["labels"] in (0, 1)
     with pytest.raises(FileExistsError):
-        PrefixTokenizer(tokenizer).cache_tokens(processor, destination, {"max_length": 512})
+        storage.save_inputs(encoded, tokenizer, encoding_settings)
+
 
 
 @pytest.mark.parametrize("damage", ["snapshot", "audit", "source", "sketch", "sampling", "phase"])
@@ -101,7 +109,8 @@ def test_saved_solution_overrides_round_robin(prepared_inputs: CollectionFixture
             assert row["reference_solution"] == ("Alternate proof." if saved_index else "The answer is one.")
 
 
-def test_reference_and_history_are_frozen(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast) -> None:
+def test_reference_and_history_are_frozen(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast,
+                                         encoding_settings: dict[str, Any]) -> None:
     """Later dataset edits cannot silently replace the solution associated with a processed trajectory."""
     processor = compile_fixture(prepared_inputs)
     for path in prepared_inputs.datasets_directory.rglob("*.jsonl"):
@@ -115,8 +124,14 @@ def test_reference_and_history_are_frozen(prepared_inputs: CollectionFixture, to
         captured.append(messages)
         return original(messages, max_length, prefix_id)
     encoder._encode_messages = capture
-    encoded = encoder.encode(row, {"max_length": 512})
+    encoding_settings["critic_prompt"] = "Saved critic instructions. " + encoding_settings["critic_prompt"]
+    encoding_settings["reference_prompt"] = "Saved reference instructions. " + encoding_settings["reference_prompt"]
+    encoded = encoder.encode(row, encoding_settings)
     assert encoded["labels"] == row["branch"]["final_correctness"]
+    assert all(messages[0]["role"] == "system" for messages in captured)
+    assert all(messages[0]["content"].startswith("Saved critic instructions.") for messages in captured)
+    assert "Saved reference instructions." in captured[1][0]["content"]
+    assert "Saved reference instructions." not in captured[0][0]["content"]
     assert captured[0][1] == captured[1][1]
     assert "Use symmetry." in captured[0][1]["content"]
     assert "Observed continue-oracle" in captured[0][1]["content"]
@@ -125,7 +140,7 @@ def test_reference_and_history_are_frozen(prepared_inputs: CollectionFixture, to
     assert "not available to the solver" in captured[1][0]["content"]
     assert "FINAL FUTURE" not in json.dumps(captured)
     with pytest.raises(ValueError, match="truncation"):
-        encoder.encode(row, {"max_length": 1})
+        encoder.encode(row, {**encoding_settings, "max_length": 1})
 
 
 def test_exact_fixed_splits(prepared_inputs: CollectionFixture) -> None:
@@ -137,6 +152,10 @@ def test_exact_fixed_splits(prepared_inputs: CollectionFixture) -> None:
     assert list(splits.assignments.values()).count("validation") == 1
     assert list(splits.assignments.values()).count("test") == 1
     assert ProblemSplits(prepared_inputs.datasets_directory, folder, 1).assignments == splits.assignments
+    for path in prepared_inputs.datasets_directory.rglob("*.jsonl"):
+        path.write_text("\n".join(reversed(path.read_text().splitlines())) + "\n")
+    recreated = ProblemSplits(prepared_inputs.datasets_directory, folder.parent / "recreated", 1)
+    assert recreated.assignments == splits.assignments
     with pytest.raises(ValueError, match="size differs"):
         ProblemSplits(prepared_inputs.datasets_directory, folder, 2)
 

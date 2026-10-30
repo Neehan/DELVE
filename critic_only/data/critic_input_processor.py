@@ -1,4 +1,7 @@
-"""Select verified post-continuation histories and their terminal labels from shared trajectory shards."""
+"""Build a critic input and final correctness label from each saved solver branch.
+
+For example, a branch starting at 2x supplies its history through 3x and its final grade at 5x. Oracle inputs include the actual sketch and the following solver response. The matching reference solution is attached separately for tokenization; later reasoning and grades never enter the prompt.
+"""
 
 import hashlib
 import json
@@ -21,7 +24,15 @@ from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfi
 
 
 def select_input_fork(metadata: dict[str, Any], horizon: int) -> int | None:
-    """Select root runs and continuation forks with one observed block and a nonterminal future."""
+    """Find a run's branch point if observing one more block still leaves a future to predict.
+
+    Args:
+        metadata: Saved run metadata identifying the experiment, total budget, fork, and sketch injection point.
+        horizon: Required final rollout budget in blocks, not the remaining budget after the critic input.
+
+    Returns:
+        int | None: Fork block for an eligible run, or None when its budget/experiment is excluded or no future block remains.
+    """
     if metadata["compute_multiplier_k"] != horizon:
         return None
     experiment = metadata["experiment"]
@@ -37,13 +48,28 @@ def select_input_fork(metadata: dict[str, Any], horizon: int) -> int | None:
 
 
 def selection_fraction(key: str, seed: int) -> float:
-    """Assign a stable fraction to a problem without depending on its branches or file order."""
+    """Map a problem key to a reproducible number for selecting problem subsets.
+
+    Args:
+        key: Stable problem-selection key; callers use different prefixes for training and oracle subsets.
+        seed: Seed used with the key to produce a reproducible hash.
+
+    Returns:
+        float: Deterministic fraction in [0, 1), used to rank or select whole problems.
+    """
     digest = hashlib.sha256(f"{seed}:{key}".encode()).digest()
     return int.from_bytes(digest) / HASH_SCALE
 
 
 def select_unaided_examples(dataset: Dataset) -> Dataset:
-    """Select unaided histories for the baseline's training and all primary evaluations."""
+    """Keep only trajectories where the solver received no oracle sketch.
+
+    Args:
+        dataset: Example dataset containing an oracle boolean column.
+
+    Returns:
+        Dataset: Rows without solver-visible sketch injections; raises when no unaided rows remain.
+    """
     selected = dataset.select([index for index, oracle in enumerate(dataset["oracle"]) if not oracle])
     if not len(selected):
         raise ValueError("no unaided histories available")
@@ -51,10 +77,16 @@ def select_unaided_examples(dataset: Dataset) -> Dataset:
 
 
 def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
-    """Keep a nested, seed-1234 subset of whole problems, rounding the requested count down.
+    """Choose a reproducible fraction of training problems and retain all their branches.
 
-    Selection is independent of row order and the training seed, so model variants
-    use the same problems and retain every available branch of each selected problem.
+    Selection is independent of row order and the training seed, so model variants use the same problems and retain every available branch of each selected problem.
+
+    Args:
+        dataset: Training examples containing problem_key; all branches of a selected problem are retained.
+        fraction: Requested fraction of distinct training problems, in (0, 1].
+
+    Returns:
+        Dataset: Deterministic nested subset selected with DEFAULT_SEED; raises if rounding selects no problems.
     """
     if not 0 < fraction <= 1:
         raise ValueError("training problem fraction must be in (0, 1]")
@@ -68,10 +100,20 @@ def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
 
 
 class CriticInputProcessor:
-    """Yield checked post-continuation histories and matching labels through iter_inputs()."""
+    """Select the visible history and final label for each critic example.
+
+    iter_inputs yields one record per branch. Helpers reconstruct the checkpoint, verify the original source history and sketch, and select its matching reference solution. Each branch keeps its own history and final label.
+    """
 
     def __init__(self, config: PreparationConfig) -> None:
-        """Read a verified Parquet collection and index identities without materializing histories."""
+        """Check the processed files and index trajectory IDs for later lookup.
+
+        Args:
+            config: Processed model directory and requested final rollout horizon.
+
+        Returns:
+            None. Verifies source checksums and indexes saved trajectories and problems for iter_inputs.
+        """
         self.config = config
         self.manifest = json.loads((config.source_directory / MANIFEST_FILENAME).read_text())
         if file_digest(config.source_directory.parent / SPLIT_FILENAME) != self.manifest["split_sha256"]:
@@ -91,7 +133,11 @@ class CriticInputProcessor:
         self.problems: dict[str, Problem] = {}
 
     def iter_inputs(self) -> Iterator[dict[str, Any]]:
-        """Yield one observed branch history and its own terminal label, keeping source groups together."""
+        """Yield each eligible branch's partial history, matching reference, and final label.
+
+        Returns:
+            Iterator[dict[str, Any]]: Serialized InputPrefix records, one per eligible observed branch, each with its own final binary label.
+        """
         groups: dict[tuple[Any, ...], list[tuple[Path, dict[str, Any]]]] = defaultdict(list)
         identities = set()
         for name, text in zip(self.dataset["trajectory_id"], self.dataset["metadata"]):
@@ -115,20 +161,42 @@ class CriticInputProcessor:
                 yield record.model_dump()
 
     def _read_json(self, path: Path) -> Any:
-        """Read the exact serialized artifact preserved in its trajectory row."""
+        """Read saved run metadata, conversation, or audit JSON from a Parquet row.
+
+        Args:
+            path: Logical saved artifact path: trajectory ID followed by meta.json, conversation.json.zst, or audit.json.
+
+        Returns:
+            Any: Decoded JSON object from the corresponding Parquet column; no raw artifact file is opened.
+        """
         columns = {META_FILENAME: "metadata", CONVERSATION_FILENAME: "conversation", AUDIT_FILENAME: "audit"}
-        row = self.dataset[self.indices[str(path.parent)]]
-        return json.loads(row[columns[path.name]])
+        column = columns[path.name]
+        row = self.dataset.select_columns([column])[self.indices[str(path.parent)]]
+        return json.loads(row[column])
 
     def _load_problem(self, metadata: dict[str, Any]) -> Problem:
-        """Use the reference frozen during setup, never a subsequently edited dataset file."""
+        """Read the problem and solutions stored during setup, rather than the current dataset files.
+
+        Args:
+            metadata: Run metadata identifying the competition, year, and problem ID.
+
+        Returns:
+            Problem: Dataset record frozen during setup, including its statement and reference solutions.
+        """
         key = f"{metadata['competition']}/{metadata['year']}/{metadata['problem_id']}"
         if key not in self.problems:
-            self.problems[key] = Problem.model_validate_json(self.dataset[self.problem_indices[key]]["problem"])
+            self.problems[key] = Problem.model_validate_json(self.dataset.select_columns(["problem"])[self.problem_indices[key]]["problem"])
         return self.problems[key]
 
     def _build_branch_inputs(self, group: list[tuple[Path, dict[str, Any]]]) -> list[InputPrefix]:
-        """Validate the common source, then retain each branch's own post-continuation history."""
+        """Build inputs from related branches after checking their shared source and sketch selection.
+
+        Args:
+            group: Continuation paths and metadata sharing the same problem, source run, source seed, and fork block.
+
+        Returns:
+            list[InputPrefix]: One observed-history record per branch, using the group's matching solution selection.
+        """
         _, metadata = group[0]
         root = Path(metadata["competition"]) / str(metadata["year"]) / metadata["model"]
         source = root / metadata["source_arm"] / metadata["problem_id"] / f"seed_{metadata['source_seed']}"
@@ -161,7 +229,16 @@ class CriticInputProcessor:
         return records
 
     def _build_input(self, path: Path, metadata: dict[str, Any], solution_index: int | None) -> InputPrefix:
-        """Read one block after the fork and pair that history with its own final correctness."""
+        """Pair the history one block after the fork with that branch's final answer grade.
+
+        Args:
+            path: Saved trajectory ID relative to the original outputs root.
+            metadata: Run metadata identifying its fork, oracle condition, seed, and final budget.
+            solution_index: Explicit matching solution index, or None to apply the problem's seed-based round robin.
+
+        Returns:
+            InputPrefix: History through one block after the fork, matching reference, remaining budget, split, and final label.
+        """
         fork = metadata["continue_at"] if metadata["experiment"] in CONTINUATION_EXPERIMENTS else 0
         oracle = metadata["experiment"] in ORACLE_EXPERIMENTS
         outcome = self._read_branch_outcome(path, metadata, fork)
@@ -177,12 +254,21 @@ class CriticInputProcessor:
         key = f"{problem.competition}/{problem.year}/{problem.problem_id}"
         return InputPrefix(prefix_id=f"{outcome.path}/checkpoint_{fork + 1}x", oracle=oracle, problem_key=key,
                            fork=fork, remaining_blocks=self.config.horizon - fork - 1,
-                           split=self.dataset[self.indices[str(path)]]["split"], messages=snapshot["messages"],
+                           split=self.dataset.select_columns(["split"])[self.indices[str(path)]]["split"], messages=snapshot["messages"],
                            phase=request["phase"], response_finished=request["finish_reason"] == "stop",
                            solution_index=solution_index, reference_solution=solution.solution, branch=outcome)
 
     def _validate_source_history(self, messages: list[dict[str, str]], prefix: list[dict[str, str]], path: Path) -> None:
-        """Allow an unfinished assistant response to extend, but never alter any source text."""
+        """Reject a branch that changes the history it was supposed to continue.
+
+        Args:
+            messages: Observed branch history after continuation.
+            prefix: Source history at the fork; its final assistant message may be extended by an unaided branch.
+            path: Trajectory identifier included in validation errors.
+
+        Returns:
+            None. Raises ValueError if the branch changes or omits any source-prefix text.
+        """
         if (not prefix or len(messages) < len(prefix) or messages[:len(prefix) - 1] != prefix[:-1]
                 or messages[len(prefix) - 1]["role"] != prefix[-1]["role"]
                 or not messages[len(prefix) - 1]["content"].startswith(prefix[-1]["content"])):
@@ -190,7 +276,17 @@ class CriticInputProcessor:
 
     def _validate_oracle_injection(self, messages: list[dict[str, str]], source: list[dict[str, str]],
                                    sketch: str, path: Path) -> dict[str, str]:
-        """Check the saved injection while retaining the solver's response as critic input."""
+        """Check that the sketch follows the unchanged source history and matches the chosen solution.
+
+        Args:
+            messages: Observed oracle branch history, including the injected sketch and subsequent response.
+            source: Unmodified source history at the fork.
+            sketch: Sketch text belonging to the selected reference solution.
+            path: Trajectory identifier included in validation errors.
+
+        Returns:
+            dict[str, str]: The saved user message containing the oracle sketch; raises if the injection or source history differs.
+        """
         if len(messages) <= len(source):
             raise ValueError(f"oracle branch has no injection message: {path}")
         candidate = messages[len(source)]
@@ -201,7 +297,16 @@ class CriticInputProcessor:
         return candidate
 
     def _read_checkpoint(self, path: Path, block: int, oracle: bool) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Recover history and phase at the input boundary, excluding all later text and state."""
+        """Reconstruct the history and solver phase at the requested block boundary.
+
+        Args:
+            path: Saved trajectory ID whose conversation contains checkpoint boundaries.
+            block: Absolute checkpoint block to reconstruct, measured from the original problem start.
+            oracle: Whether the reconstructed history must contain a solver-visible sketch injection.
+
+        Returns:
+            tuple[dict[str, Any], dict[str, Any]]: Snapshot with messages/output_tokens, and the last request record at that boundary.
+        """
         tokens = block * OUTPUT_TOKENS_PER_BLOCK
         state = RunState.model_validate(self._read_json(path / CONVERSATION_FILENAME))
         if state.output_tokens < tokens:
@@ -219,7 +324,16 @@ class CriticInputProcessor:
         return snapshot, requests[-1]
 
     def _read_branch_outcome(self, path: Path, metadata: dict[str, Any], fork: int) -> BranchOutcome:
-        """Require a complete audit and retain only the final answer grade as the training target."""
+        """Read the final answer grade, rejecting incomplete or inconsistent audits.
+
+        Args:
+            path: Saved trajectory ID whose audit supplies the final label.
+            metadata: Run metadata providing the continuation seed.
+            fork: Block where this branch starts; determines the expected audited checkpoints.
+
+        Returns:
+            BranchOutcome: Branch seed, trajectory ID, and correctness of the last answer at the configured final horizon.
+        """
         audit = self._read_json(path / AUDIT_FILENAME)
         if audit["complete"] is not True or audit["output_tokens"] != self.config.horizon * OUTPUT_TOKENS_PER_BLOCK:
             raise ValueError(f"incomplete branch audit: {path}")

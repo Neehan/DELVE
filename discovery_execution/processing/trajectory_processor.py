@@ -1,4 +1,7 @@
-"""Compile audited trajectories into portable shards without reconstructing solver messages."""
+"""Combine many small solver output files into reusable Parquet trajectory chunks.
+
+Each row preserves the full conversation, run metadata, audit grades, and matching problem with solutions. Verify saved checkpoints before storing the conversation from which they can be reconstructed. Critic input selection happens later.
+"""
 
 import json
 from pathlib import Path
@@ -11,21 +14,41 @@ from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK,
 )
 from discovery_execution.harness.models import RunState
-from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLITS
-from discovery_execution.processing.splits import ProblemSplits
+from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLITS, TRAJECTORIES_SUBDIRECTORY
+from discovery_execution.processing.problem_splits import ProblemSplits
 from discovery_execution.processing.storage import checkpoint_snapshot, file_digest, write_json_atomic, write_parquet_shards
 
 
 class TrajectoryProcessor:
-    """Validate complete audited runs and preserve their JSON artifacts in Parquet rows."""
+    """Pack one solver's raw runs into larger Parquet files.
+
+    compile_trajectories writes the splits and manifest using ProblemSplits. _trajectory_row checks a run and preserves its metadata, conversation, audit, and problem in one row. It does not construct critic prompts.
+    """
 
     def __init__(self, source: Path, destination: Path, solver_model: str, splits: ProblemSplits) -> None:
-        """Inject collection paths and the shared problem assignments."""
+        """Store the source, destination, solver selection, and shared problem splits.
+
+        Args:
+            source: Root directory of raw solver outputs.
+            destination: New processed directory for one solver model.
+            solver_model: Solver identifier used to select raw runs.
+            splits: Shared problem records and fixed train/validation/test assignments.
+
+        Returns:
+            None. Stores the paths and split provider for compile_trajectories.
+        """
         self.source, self.destination = source, destination
         self.solver_model, self.splits = solver_model, splits
 
     def compile_trajectories(self, source_revision: str | None) -> None:
-        """Publish all splits together; preserve metadata, conversation, and audit JSON losslessly."""
+        """Pack complete solver runs into Parquet chunks and write their manifest.
+
+        Args:
+            source_revision: Repository@commit provenance for downloaded outputs, or None for local outputs.
+
+        Returns:
+            None. Writes trajectory shards and their manifest, saving shared problem assignments if they do not exist.
+        """
         if self.destination.exists():
             raise FileExistsError(self.destination)
         partitions: dict[str, list[Path]] = {split: [] for split in SPLITS}
@@ -42,8 +65,8 @@ class TrajectoryProcessor:
             staging.mkdir()
             checksums = {}
             for split, paths in partitions.items():
-                shards = write_parquet_shards((self._trajectory_row(path, split) for path in paths), staging / split)
-                checksums.update({f"{split}/{name}": digest for name, digest in shards.items()})
+                shards = write_parquet_shards((self._trajectory_row(path, split) for path in paths), staging / split / TRAJECTORIES_SUBDIRECTORY)
+                checksums.update({f"{split}/{TRAJECTORIES_SUBDIRECTORY}/{name}": digest for name, digest in shards.items()})
             self.splits.save_assignments()
             manifest = {"solver_model": self.solver_model, "source_revision": source_revision,
                         "split_sha256": file_digest(self.splits.path), "trajectories": checksums}
@@ -51,7 +74,15 @@ class TrajectoryProcessor:
             staging.rename(self.destination)
 
     def _trajectory_row(self, directory: Path, split: str) -> dict[str, Any]:
-        """Check every checkpoint against its conversation boundary before discarding redundant snapshots."""
+        """Validate one saved run and combine its conversation, metadata, audit, and problem.
+
+        Args:
+            directory: Raw directory containing one run's metadata, conversation, audit, and checkpoint snapshots.
+            split: Already assigned train/validation/test partition for the run's problem.
+
+        Returns:
+            dict[str, Any]: Trajectory/problem IDs, split, and serialized metadata, conversation, audit, and problem record.
+        """
         metadata_text = (directory / META_FILENAME).read_text()
         conversation_text = zstandard.decompress((directory / CONVERSATION_FILENAME).read_bytes()).decode()
         audit_text = (directory / AUDIT_FILENAME).read_text()

@@ -1,4 +1,4 @@
-"""Geometric discovery and execution curves for terminal success prediction."""
+"""Predict final answer correctness by combining strategy discovery and execution probabilities."""
 
 import torch
 from torch import Tensor, nn
@@ -10,10 +10,22 @@ from critic_only.models.models import CriticConfig
 
 
 class DECritic(BaseCritic):
-    """Learn whether a strategy is discovered, future discovery, and execution; latent parameters are not strategy labels."""
+    """Estimate success by separating strategy discovery from strategy execution.
+
+    The heads predict s, the probability a strategy is already discovered; alpha, the probability of discovering one per future block; and epsilon_r, success given a strategy and r remaining blocks. Unaided success is s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_(r-j+1). Oracle histories use epsilon_r alone. These components are learned from final correctness labels, not explicit strategy labels. Epsilon may decrease because later revisions can spoil an answer.
+
+    predict implements this mixture in log space; BaseCritic supplies the MLP, forward pass, loss, and checkpoints.
+    """
 
     def __init__(self, settings: CriticConfig) -> None:
-        """Keep the execution curve unrestricted to allow correct-to-incorrect revisions."""
+        """Add heads for strategy discovery and execution to the shared MLP.
+
+        Args:
+            settings: hidden_size sets head input width; horizon - 1 sets the number of future execution budgets.
+
+        Returns:
+            None.
+        """
         super().__init__(settings)
         self.horizons = settings.horizon - 1
         self.strategy_discovered = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
@@ -21,11 +33,17 @@ class DECritic(BaseCritic):
         self.execution = nn.Linear(settings.hidden_size, self.horizons, dtype=torch.float32)
 
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Return the DE value at each history's remaining budget, or its execution value for oracle histories.
+        """Combine discovery and execution probabilities into one final-success logit.
 
-        All heads read the supplied history. Oracle examples include the actual sketch and one block of solver execution; they supervise the remaining execution value; unaided examples use the shared execution head inside the discovery convolution. Transferring that structure across histories is an inductive bias, not an identified causal decomposition.
+        Unaided rows use the mixture defined in the class docstring. Oracle rows use epsilon_r alone. Log-space calculation avoids underflow in small probabilities.
 
-        strategy_discovered is the probability that the observed history already contains a viable strategy. Alpha describes discovery per block conditional on still needing one. For remaining budget r and strategy-discovered probability s, success is s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_{r-j+1}. Failure includes the possibility of never discovering a strategy. Return log(success) - log(failure) without rounding either probability to zero or one.
+        Args:
+            hidden: MLP outputs [N, hidden_size], including both reference versions.
+            oracle: Solver-sketch flags [N]. True selects execution alone; a critic-only reference does not set this flag.
+            remaining_blocks: Future budget [N], from 1 to self.horizons; selects epsilon_r and limits discovery delays.
+
+        Returns:
+            Tensor: Float32 log(success) - log(failure) [N]. Sigmoid gives final-success probability.
         """
         # Compute log probabilities in FP32 even when the model and heads run under BF16 autocast.
         strategy_discovered_logits = self.strategy_discovered(hidden).float().squeeze(-1)

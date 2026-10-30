@@ -12,7 +12,7 @@ from scipy.special import logit
 from transformers import EvalPrediction, PreTrainedTokenizerFast
 
 from critic_only.constants import MODEL_FILENAME
-from critic_only.data.features import collate_features
+from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
 from critic_only.models.ppo_critic import PPOCritic
@@ -24,11 +24,12 @@ from critic_only.models.models import CriticConfig
 def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str], CriticConfig],
                                    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """All MLP and head parameters train; compact checkpoints reproduce predictions exactly."""
-    model = create_critic(critic_settings(variant))
+    model = create_critic(critic_settings(variant), True)
     assert type(model).__name__ == {"ppo-critic": "PPOCritic", "ppo-oracle-critic": "PPOOracleCritic", "de-critic": "DECritic"}[variant]
-    batch = collate_features(training_rows)
+    batch = CriticBatcher(None)(training_rows)
     labels = batch.pop("labels")
-    batch = {key: batch[key][:len(labels)] for key in ("hidden_state", "oracle", "remaining_blocks")}
+    batch = {"inputs": {"hidden_state": batch["inputs"]["hidden_state"][:len(labels)]},
+             "oracle": batch["oracle"][:len(labels)], "remaining_blocks": batch["remaining_blocks"][:len(labels)]}
     model.train()
     prediction = model(**batch)
     assert prediction.shape == (len(labels),)
@@ -40,7 +41,7 @@ def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str],
     model.eval()
     expected = model(**batch).detach()
     model.save(directory)
-    restored = create_critic(critic_settings(variant))
+    restored = create_critic(critic_settings(variant), True)
     restored.load_from_weights(directory)
     restored.eval()
     torch.testing.assert_close(restored(**batch), expected)
@@ -54,9 +55,9 @@ def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str
     directory = tmp_path / "checkpoint"
     model.save(directory)
     weights = {name: tensor + 1 for name, tensor in load_file(str(directory / MODEL_FILENAME)).items()}
-    weights["head.bias"] = torch.ones(2)
+    weights["prediction_head.bias"] = torch.ones(2)
     save_file(weights, str(directory / MODEL_FILENAME))
-    with pytest.raises(ValueError, match="shape differs for head.bias"):
+    with pytest.raises(ValueError, match="shape differs for prediction_head.bias"):
         model.load_from_weights(directory)
     for name, parameter in model.named_parameters():
         torch.testing.assert_close(parameter, original[name], rtol=0, atol=0)
@@ -93,7 +94,7 @@ def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) ->
 
 def test_direct_head_is_shared_across_history_types(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Condition metadata must not select a separate direct-model head; the actual history provides context."""
-    model = create_critic(critic_settings("ppo-oracle-critic"))
+    model = create_critic(critic_settings("ppo-oracle-critic"), True)
     hidden = torch.randn(1, model.settings.hidden_size).expand(2, -1)
     prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([1, 1]))
     assert prediction.shape == (2,)
@@ -212,3 +213,21 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
     expected_gradients = torch.autograd.grad(expected.sum(), parameters)
     for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
         torch.testing.assert_close(actual_gradient, expected_gradient)
+
+
+def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfig],
+                                  tokenizer: PreTrainedTokenizerFast, token_rows: list[dict[str, Any]]) -> None:
+    """Token inputs train adapters and heads while the pretrained Qwen parameters remain frozen."""
+    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": "lora", "lora_rank": 2, "lora_alpha": 4})
+    model = create_critic(settings, True)
+    batch = CriticBatcher(tokenizer)(token_rows)
+    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    labels = torch.cat((batch["labels"], batch["labels"][batch["privileged_indices"]]))
+    model.loss(logits, labels, batch["oracle"]).mean().backward()
+    assert model.language_model is not None
+    parameters = dict(model.language_model.named_parameters())
+    adapters = [parameter for name, parameter in parameters.items() if "lora_" in name]
+    assert adapters and all(parameter.requires_grad and parameter.grad is not None for parameter in adapters)
+    assert any(torch.count_nonzero(cast(torch.Tensor, parameter.grad)).item() > 0 for parameter in adapters)
+    assert all(not parameter.requires_grad and parameter.grad is None
+               for name, parameter in parameters.items() if "lora_" not in name)

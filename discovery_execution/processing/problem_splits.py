@@ -1,4 +1,4 @@
-"""Assign whole problems once, with exact training size and proportional competition coverage."""
+"""Assign problems to fixed train, validation, and test splits reused by every solver model."""
 
 import hashlib
 from collections import defaultdict
@@ -13,10 +13,22 @@ from discovery_execution.processing.storage import write_parquet_atomic
 
 
 class ProblemSplits:
-    """Load problems and persist a fixed assignment shared by every solver model."""
+    """Keep every trajectory of a problem in the same split across solver models.
+
+    problems holds the loaded problem records; assignments maps their keys to splits. Existing assignments are reused, or new ones are computed with fixed seeded selection and proportional competition coverage. save_assignments writes splits.parquet.
+    """
 
     def __init__(self, datasets_directory: Path, processed_directory: Path, training_count: int) -> None:
-        """Require unique identities and enough older problems for training and validation."""
+        """Load problems and reuse or create their split assignments.
+
+        Args:
+            datasets_directory: Root containing competition/year JSONL problem files.
+            processed_directory: Shared processing root containing splits.parquet.
+            training_count: Exact number of pre-test-year problems assigned to training.
+
+        Returns:
+            None. Loads problem records and either reuses saved assignments or computes new assignments in memory.
+        """
         self.path = processed_directory / SPLIT_FILENAME
         self.problems: dict[str, Problem] = {}
         for path in sorted(datasets_directory.glob("*/*.jsonl")):
@@ -31,7 +43,14 @@ class ProblemSplits:
         self.assignments = self._load_or_assign(training_count)
 
     def _load_or_assign(self, training_count: int) -> dict[str, str]:
-        """Reuse published assignments and reject a changed problem universe or split size."""
+        """Reuse saved splits only if the problem IDs and requested training count still match.
+
+        Args:
+            training_count: Required number of training problems; must agree with an existing split file.
+
+        Returns:
+            dict[str, str]: Mapping from competition/year/problem_id keys to train, validation, or test.
+        """
         if self.path.exists():
             rows = pq.read_table(self.path).to_pylist()
             assignments = {row["problem_key"]: row["split"] for row in rows}
@@ -46,7 +65,14 @@ class ProblemSplits:
         return self._assign_problems(training_count)
 
     def _assign_problems(self, training_count: int) -> dict[str, str]:
-        """Allocate exact training counts proportionally, then rank problems with seed 1234."""
+        """Hold out test-year problems and divide older problems between training and validation.
+
+        Args:
+            training_count: Exact training quota, leaving at least one older problem for validation.
+
+        Returns:
+            dict[str, str]: Deterministic assignments; test-year problems are held out and older training quotas are proportional to competition size.
+        """
         groups: dict[str, list[str]] = defaultdict(list)
         assignments = {}
         for key, problem in self.problems.items():
@@ -68,7 +94,11 @@ class ProblemSplits:
         return assignments
 
     def save_assignments(self) -> None:
-        """Publish the assignment only once; later model preparation reuses the same file."""
+        """Save splits.parquet if it does not already exist.
+
+        Returns:
+            None. Writes splits.parquet when absent; an existing assignment file is retained.
+        """
         if not self.path.exists():
             rows = [{"problem_key": key, "split": split} for key, split in sorted(self.assignments.items())]
             write_parquet_atomic(self.path, pa.Table.from_pylist(rows))

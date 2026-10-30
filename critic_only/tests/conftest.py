@@ -18,12 +18,14 @@ from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
 from critic_only.tests.models import CollectionFixture
 from critic_only.models.models import CriticConfig
+from critic_only.constants import CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH
 
 
 @pytest.fixture(autouse=True)
 def local_dataset_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep library-generated Arrow caches inside the test's disposable directory."""
     monkeypatch.setattr(datasets_config, "HF_DATASETS_CACHE", tmp_path / "hf-cache")
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf-cache"))
 
 
 @pytest.fixture
@@ -33,6 +35,13 @@ def tokenizer() -> PreTrainedTokenizerFast:
     backend.pre_tokenizer = Whitespace()
     return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]", padding_side="right",
                                    chat_template=(TEMPLATES_DIRECTORY / "qwen3.jinja").read_text())
+
+
+@pytest.fixture
+def encoding_settings() -> dict[str, Any]:
+    """Freeze prompt text and the token limit exactly as setup records them."""
+    return {"max_length": 512, "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
+            "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
 
 @pytest.fixture
@@ -47,8 +56,8 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
     def create(variant: str) -> CriticConfig:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
-                                                input_size=16, hidden_size=16, feature_signature="test-signature",
-                                                oracle_weight=1))
+                                                input_size=16, hidden_size=16, data_signature="test-signature",
+                                                oracle_weight=1, training_mode="frozen", lora_rank=None, lora_alpha=None))
 
     return create
 

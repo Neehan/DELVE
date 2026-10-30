@@ -13,13 +13,11 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizerFast, TrainerCallback, TrainingArguments, set_seed
 from transformers.trainer_pt_utils import find_batch_size
 
-from critic_only.data.features import collate_features
+from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.eval.metrics import compute_metrics
 from critic_only.models.base_critic import BaseCritic
-from critic_only.models.de_critic import DECritic
 from critic_only.models.models import CriticConfig
-from critic_only.models.ppo_critic import PPOCritic
-from critic_only.models.ppo_oracle_critic import PPOOracleCritic
+from critic_only.models.loader import create_critic
 from critic_only.trainer.base_trainer import BaseTrainer
 
 
@@ -38,8 +36,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                  rows: list[dict[str, Any]], callbacks: list[TrainerCallback]) -> BaseTrainer:
     """Use real Trainer accumulation, evaluation, and checkpoint selection on a tiny CPU model."""
     set_seed(17)
-    critic_type = DECritic if settings.variant == "de-critic" else PPOOracleCritic if settings.variant == "ppo-oracle-critic" else PPOCritic
-    model = critic_type(settings)
+    model = create_critic(settings, True)
     data = Dataset.from_list(rows)
     args = TrainingArguments(output_dir=str(directory), max_steps=4, per_device_train_batch_size=1,
                              per_device_eval_batch_size=1, gradient_accumulation_steps=2, learning_rate=1e-3,
@@ -48,15 +45,18 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                              logging_steps=1, disable_tqdm=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False, seed=17,
                              remove_unused_columns=False, label_names=["labels"], report_to="none")
-    return BaseTrainer(model=model, args=args, data_collator=collate_features, train_dataset=data,
+    return BaseTrainer(model=model, args=args, data_collator=CriticBatcher(tokenizer if settings.training_mode == "lora" else None), train_dataset=data,
                        eval_dataset=data, compute_metrics=partial(compute_metrics, problem_keys=list(data["problem_key"])),
                        callbacks=callbacks)
 
 
-def test_training_resume(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                         training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["frozen", "lora"])
+def test_training_resume(mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+                         training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
-    settings = critic_settings("de-critic")
+    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
+        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+    training_rows = token_rows if mode == "lora" else training_rows
     full = make_trainer(tmp_path / "full", settings, tokenizer, training_rows, [])
     full.train()
     interrupted = make_trainer(tmp_path / "resumed", settings, tokenizer, training_rows, [InterruptTraining()])
@@ -107,7 +107,7 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
     model.eval()
     forward = Mock(wraps=model.forward)
     monkeypatch.setattr(model, "forward", forward)
-    batch = collate_features(rows)
+    batch = CriticBatcher(None)(rows)
     assert find_batch_size(batch) == len(rows)
     actual, outputs = trainer.compute_loss(model, batch, return_outputs=True)
     assert forward.call_count == 1
@@ -120,7 +120,7 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
         losses = []
         for tokens in views:
             ids = torch.tensor([tokens])
-            prediction = model(hidden_state=ids, oracle=torch.tensor([row["oracle"]]),
+            prediction = model(inputs={"hidden_state": ids}, oracle=torch.tensor([row["oracle"]]),
                                remaining_blocks=torch.tensor([row["remaining_blocks"]]))
             losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
         expected_losses.append(torch.stack(losses).mean())

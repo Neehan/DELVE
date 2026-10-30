@@ -1,4 +1,4 @@
-"""Hugging Face Trainer integration; Accelerate owns distributed execution and optimizer state."""
+"""Train critics on the same trajectory with and without a reference solution, averaging the two losses."""
 
 import json
 from pathlib import Path
@@ -10,25 +10,49 @@ from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
-from critic_only.constants import PAIRED_INPUT_WEIGHT, TRAINING_ARGS_FILENAME
+from critic_only.constants import TRAINING_ARGS_FILENAME
 from critic_only.models.base_critic import BaseCritic
 
 
 class BaseTrainer(Trainer):
-    """Override only the binary loss and compact model serialization; retain HF training/resume machinery."""
+    """Add paired-reference loss, metric logging, and critic checkpoints to Hugging Face Trainer.
+
+    compute_loss defines our objective. Hugging Face handles batching, optimization, and resume; subclasses need no additional overrides.
+    """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Keep HF initialization and fail before training if compact saves cannot support the backend."""
+        """Initialize Hugging Face training with our loss, logging, and checkpoint methods.
+
+        Only single-device and DDP training are supported by our checkpoint format. Progress bars are replaced with periodic JSON logs.
+
+        Args:
+            *args: Positional arguments forwarded to Trainer.
+            **kwargs: Trainer options such as model, datasets, collator, and training arguments.
+
+        Returns:
+            None.
+        """
         super().__init__(*args, **kwargs)
         if self.is_fsdp_enabled or self.is_deepspeed_enabled:
-            raise ValueError("compact critic checkpoints support Trainer single-device/DDP only")
+            raise ValueError(
+                "compact critic checkpoints support Trainer single-device/DDP only"
+            )
         self.model_accepts_loss_kwargs = False
         self.args.disable_tqdm = True
         self.remove_callback(PrinterCallback)
         self.remove_callback(ProgressCallback)
 
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
-        """Flush one metric record and atomically persist HF history on the primary process."""
+        """Print and save the latest metrics so progress survives a job cancellation.
+
+        Args:
+            logs: Metrics supplied by Trainer, such as loss and learning rate.
+            *args: Additional positional arguments forwarded to Trainer.log.
+            **kwargs: Additional keyword arguments forwarded to Trainer.log.
+
+        Returns:
+            None. The primary process updates trainer_state.json after every log.
+        """
         super().log(logs, *args, **kwargs)
         if self.is_world_process_zero():
             print(json.dumps(self.state.log_history[-1]), flush=True)
@@ -38,59 +62,135 @@ class BaseTrainer(Trainer):
             self.state.save_to_json(str(temporary))
             temporary.replace(directory / TRAINER_STATE_NAME)
 
-    def compute_loss(self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        """Combine reference-conditioned and unprivileged input losses into one training objective.
+    def compute_loss(
+        self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Average each trajectory's losses with and without its reference solution.
 
-        The batch contains B input views without reference solutions followed by P privileged views that include a reference solution. labels contains one binary outcome for each of the B histories; privileged_indices maps the P extra views to those same labels. A single model forward processes all B+P views.
+        Both predictions use the same final correctness label. With a reference, trajectory_loss = (loss_without_reference + loss_with_reference) / 2. Without one, trajectory_loss = loss_without_reference. Return the batch mean.
 
-        BaseCritic.loss returns one loss per prefix and input view. A prefix with a reference contributes (without_reference_loss + with_reference_loss)/2; a prefix without one contributes its full without-reference loss. The final scalar is the mean over B prefixes, so adding a reference does not double a prefix's weight. Predictions themselves are never averaged.
-
-        Each example has one history and one final binary label. Oracle histories already include the sketch message; a privileged view adds the reference to the critic system prompt while preserving that history.
+        Args:
+            model: Critic, possibly wrapped for distributed training; run it once for both input versions.
+            inputs: B labels and the batched model inputs. The first B inputs omit references; the remaining P include them. privileged_indices [P] identifies which of the B trajectories those extra inputs belong to. oracle identifies solver-visible sketches, not critic-only references.
+            *args: Hugging Face may pass return_outputs as the first positional argument.
+            **kwargs: Hugging Face may request return_outputs=True for evaluation; other Trainer loss arguments are unused.
 
         Returns:
-            The scalar loss, or (loss, outputs) when Trainer requests predictions. Outputs retain separate terminal logits for both views, each shaped [B], plus a [B] privileged_available mask. Zero-filled privileged logits for missing references must be ignored using that mask.
+            Tensor: Mean training loss, or (loss, predictions) for evaluation. Predictions keep the two input versions separate.
         """
-        labels = inputs.pop("labels")
-        indices = inputs.pop("privileged_indices")
-        logits = model(hidden_state=inputs["hidden_state"], oracle=inputs["oracle"],
-                       remaining_blocks=inputs["remaining_blocks"])
-        unprivileged_logits = logits[:len(labels)]
-        oracle = inputs["oracle"][:len(labels)]
+        labels = inputs["labels"]
+        reference_indices = inputs["privileged_indices"]
+        logits = model(
+            inputs=inputs["inputs"],
+            oracle=inputs["oracle"],
+            remaining_blocks=inputs["remaining_blocks"],
+        )
+        # The batcher places all inputs without references first, then those with references.
+        logits_without_reference = logits[: len(labels)]
+        logits_with_reference = logits[len(labels) :]
+        oracle = inputs["oracle"][: len(labels)]
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
-        losses = critic.loss(unprivileged_logits, labels, oracle)
-        privileged_logits = torch.zeros_like(unprivileged_logits)
-        available = torch.zeros(len(labels), dtype=torch.bool, device=labels.device)
-        if indices.numel():
-            privileged = logits[len(labels):]
-            privileged_losses = critic.loss(privileged, labels[indices], oracle[indices])
-            losses = losses.index_copy(0, indices, PAIRED_INPUT_WEIGHT * (losses[indices] + privileged_losses))
-            privileged_logits = privileged_logits.index_copy(0, indices, privileged)
-            available[indices] = True
-        loss = losses.mean()
+        loss_without_reference = critic.loss(logits_without_reference, labels, oracle)
+        trajectory_losses = loss_without_reference
+        if reference_indices.numel():
+            loss_with_reference = critic.loss(
+                logits_with_reference,
+                labels[reference_indices],
+                oracle[reference_indices],
+            )
+            paired_losses = 0.5 * (
+                loss_without_reference[reference_indices] + loss_with_reference
+            )
+            # Replace only trajectories that have a reference; unpaired ones keep their original loss.
+            trajectory_losses = trajectory_losses.index_copy(
+                0, reference_indices, paired_losses
+            )
+        loss = trajectory_losses.mean()
         return_outputs = args[0] if args else kwargs.get("return_outputs", False)
         if return_outputs:
-            return loss, {"logits": unprivileged_logits, "privileged_logits": privileged_logits,
-                          "privileged_available": available}
+            return loss, self._evaluation_predictions(
+                logits_without_reference, logits_with_reference, reference_indices
+            )
         return loss
 
+    def _evaluation_predictions(
+        self,
+        logits_without_reference: torch.Tensor,
+        logits_with_reference: torch.Tensor,
+        reference_indices: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Line up the two predictions per trajectory so evaluation can score them separately.
+
+        Args:
+            logits_without_reference: Predictions [B], one for every trajectory.
+            logits_with_reference: Predictions [P], only for trajectories with references.
+            reference_indices: Positions [P] of those trajectories in the full batch.
+
+        Returns:
+            dict[str, Tensor]: Two logit arrays [B] and a reference-availability mask. Missing reference predictions are zero placeholders ignored by metrics.
+        """
+        aligned_reference_logits = torch.zeros_like(
+            logits_without_reference
+        ).index_copy(0, reference_indices, logits_with_reference)
+        reference_available = torch.zeros_like(
+            logits_without_reference, dtype=torch.bool
+        )
+        reference_available[reference_indices] = True
+        return {
+            "logits": logits_without_reference,
+            "privileged_logits": aligned_reference_logits,
+            "privileged_available": reference_available,
+        }
+
     def _save(self, *args: Any, **kwargs: Any) -> None:
-        """Store the complete MLP critic; distributed sharded saves are deliberately unsupported here."""
+        """Save trainable critic weights and settings; Trainer saves optimizer state separately.
+
+        Args:
+            *args: Trainer may pass the output directory first.
+            **kwargs: Trainer may pass output_dir; otherwise use the configured training directory. Other save arguments are unused.
+
+        Returns:
+            None. Writes critic weights, critic configuration, and training_args.json.
+        """
         output_dir = args[0] if args else kwargs.get("output_dir", self.args.output_dir)
         directory = Path(output_dir)
         cast(BaseCritic, self.accelerator.unwrap_model(self.model)).save(directory)
-        (directory / TRAINING_ARGS_FILENAME).write_text(self.args.to_json_string() + "\n")
+        (directory / TRAINING_ARGS_FILENAME).write_text(
+            self.args.to_json_string() + "\n"
+        )
 
-    def _load_from_checkpoint(self, resume_from_checkpoint: str, *args: Any, **kwargs: Any) -> None:
-        """Restore trainable weights; Trainer restores optimizer, scheduler, random state, and data position."""
+    def _load_from_checkpoint(
+        self, resume_from_checkpoint: str, *args: Any, **kwargs: Any
+    ) -> None:
+        """Restore critic weights after checking that training can resume from this checkpoint.
+
+        Args:
+            resume_from_checkpoint: Directory containing critic weights, optimizer, scheduler, and random state.
+            *args: Additional Trainer checkpoint arguments; unused.
+            **kwargs: Additional Trainer checkpoint arguments; unused.
+
+        Returns:
+            None. Trainer restores optimizer, scheduler, and random state after this method.
+        """
         directory = Path(resume_from_checkpoint)
-        rng = f"rng_state_{self.args.process_index}.pth" if self.args.world_size > 1 else "rng_state.pth"
+        rng = (
+            f"rng_state_{self.args.process_index}.pth"
+            if self.args.world_size > 1
+            else "rng_state.pth"
+        )
         for filename in (OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME, rng):
             if not (directory / filename).is_file():
                 raise FileNotFoundError(directory / filename)
         cast(BaseCritic, self.model).load_from_weights(directory)
 
     def _load_best_model(self) -> None:
-        """Load the model selected by held-out problem-macro terminal NLL without references."""
+        """Restore the checkpoint with the best unaided validation NLL without reference solutions.
+
+        Returns:
+            None. Replaces the current trainable weights with the selected checkpoint.
+        """
         if self.state.best_model_checkpoint is None:
             raise ValueError("no best critic checkpoint was selected")
-        cast(BaseCritic, self.model).load_from_weights(Path(self.state.best_model_checkpoint))
+        cast(BaseCritic, self.model).load_from_weights(
+            Path(self.state.best_model_checkpoint)
+        )

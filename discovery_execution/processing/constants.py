@@ -1,4 +1,4 @@
-"""Shared collection preparation and fixed problem-split settings."""
+"""Set the shared problem split, file naming, and trajectory chunk defaults."""
 
 from pathlib import Path
 
@@ -12,3 +12,4 @@ SPLITS = ("train", "validation", "test")
 PARQUET_SHARD_BYTES = 256 * 1024 * 1024
 PARQUET_COMPRESSION = "zstd"
 HASH_CHUNK_BYTES = 1024 * 1024
+TRAJECTORIES_SUBDIRECTORY = "trajectories"

@@ -27,6 +27,7 @@ frozen = [
   "torch==2.14.1",
   "transformers==5.20.1",
   "accelerate==1.15.0",
+  "peft==0.21.2",
   "datasets==5.1.0",
   "safetensors==0.8.0",
 ]
