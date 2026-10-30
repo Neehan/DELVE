@@ -37,7 +37,8 @@ class BaseTrainer(Trainer):
             raise ValueError(
                 "compact critic checkpoints support Trainer single-device/DDP only"
             )
-        self.model_accepts_loss_kwargs = False
+        # Request the total label count so uneven microbatches retain equal per-trajectory weight.
+        self.model_accepts_loss_kwargs = True
         self.args.disable_tqdm = True
         self.remove_callback(PrinterCallback)
         self.remove_callback(ProgressCallback)
@@ -67,13 +68,13 @@ class BaseTrainer(Trainer):
     ) -> Any:
         """Average each trajectory's losses with and without its reference solution.
 
-        Both predictions use the same final correctness label. With a reference, trajectory_loss = (loss_without_reference + loss_with_reference) / 2. Without one, trajectory_loss = loss_without_reference. Return the batch mean.
+        Both predictions use the same final correctness label. With a reference, trajectory_loss = (loss_without_reference + loss_with_reference) / 2. Without one, trajectory_loss = loss_without_reference. Normalize over trajectories in the entire optimizer update, including accumulated microbatches.
 
         Args:
             model: Critic, possibly wrapped for distributed training; run it once for both input versions.
             inputs: B labels and the batched model inputs. The first B inputs omit references; the remaining P include them. privileged_indices [P] identifies which of the B trajectories those extra inputs belong to. oracle identifies solver-visible sketches, not critic-only references.
             *args: Hugging Face may pass return_outputs as the first positional argument.
-            **kwargs: Hugging Face may request return_outputs=True for evaluation; other Trainer loss arguments are unused.
+            **kwargs: return_outputs requests evaluation predictions. num_items_in_batch counts trajectories across the accumulated batches, and across ranks when configured.
 
         Returns:
             Tensor: Mean training loss, or (loss, predictions) for evaluation. Predictions keep the two input versions separate.
@@ -105,7 +106,14 @@ class BaseTrainer(Trainer):
             trajectory_losses = trajectory_losses.index_copy(
                 0, reference_indices, paired_losses
             )
-        loss = trajectory_losses.mean()
+        trajectory_count = kwargs.get("num_items_in_batch")
+        loss = (
+            trajectory_losses.mean() if trajectory_count is None
+            else trajectory_losses.sum() / trajectory_count
+        )
+        if trajectory_count is not None and self.args.average_tokens_across_devices:
+            # DDP averages rank gradients; undo that average when dividing by the global trajectory count.
+            loss = loss * self.accelerator.num_processes
         return_outputs = args[0] if args else kwargs.get("return_outputs", False)
         if return_outputs:
             return loss, self._evaluation_predictions(

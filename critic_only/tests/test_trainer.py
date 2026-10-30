@@ -95,32 +95,40 @@ def test_metrics_persist_before_checkpoint(critic_settings: Callable[[str], Crit
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("references", [(False, False), (True, True), (False, True)])
-def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
+@pytest.mark.parametrize("mode", ["frozen", "lora"])
+def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool], mode: str,
                                  critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                                 training_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+                                 training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]],
+                                 tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Match independent per-example losses and gradients, including rows with missing references."""
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode,
+        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+    column = "input_ids" if mode == "lora" else "hidden_state"
+    reference = [2, 3, 2, 3] if mode == "lora" else [0.25] * 16
+    source = token_rows if mode == "lora" else training_rows
     rows = [{**row, "oracle": variant != "ppo-critic" and index == 1,
-             "privileged_hidden_state": [0.25] * 16 if present else None}
-            for index, (row, present) in enumerate(zip(training_rows, references))]
-    trainer = make_trainer(tmp_path / "run", critic_settings(variant), tokenizer, rows, [])
+             f"privileged_{column}": reference if present else None}
+            for index, (row, present) in enumerate(zip(source, references))]
+    trainer = make_trainer(tmp_path / "run", settings, tokenizer, rows, [])
     model = cast(BaseCritic, trainer.model)
     model.eval()
     forward = Mock(wraps=model.forward)
     monkeypatch.setattr(model, "forward", forward)
-    batch = CriticBatcher(None)(rows)
+    batcher = CriticBatcher(tokenizer if mode == "lora" else None)
+    batch = batcher(rows)
     assert find_batch_size(batch) == len(rows)
     actual, outputs = trainer.compute_loss(model, batch, return_outputs=True)
     assert forward.call_count == 1
     expected_losses = []
     for row in rows:
         labels = torch.tensor([row["labels"]], dtype=torch.float32)
-        views = [row["hidden_state"]]
-        if row["privileged_hidden_state"] is not None:
-            views.append(row["privileged_hidden_state"])
+        views = [row[column]]
+        if row[f"privileged_{column}"] is not None:
+            views.append(row[f"privileged_{column}"])
         losses = []
         for tokens in views:
-            ids = torch.tensor([tokens])
-            prediction = model(inputs={"hidden_state": ids}, oracle=torch.tensor([row["oracle"]]),
+            inputs = batcher([{**row, column: tokens, f"privileged_{column}": None}])["inputs"]
+            prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
                                remaining_blocks=torch.tensor([row["remaining_blocks"]]))
             losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
         expected_losses.append(torch.stack(losses).mean())
@@ -130,3 +138,30 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool],
     for actual_gradient, expected_gradient in zip(torch.autograd.grad(actual, parameters), torch.autograd.grad(expected, parameters)):
         torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-6, rtol=1e-4)
     assert outputs["privileged_available"].tolist() == list(references)
+
+
+@pytest.mark.parametrize("mode", ["frozen", "lora"])
+def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
+    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+    """Uneven microbatches must give each trajectory equal weight in an optimizer update."""
+    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
+        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+    rows = token_rows if mode == "lora" else training_rows
+    dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": 1, "oracle": True}])
+    updates = []
+    for batch_size, accumulation in ((3, 1), (2, 2), (1, 3)):
+        set_seed(17)
+        model = create_critic(settings, True)
+        args = TrainingArguments(output_dir=str(tmp_path / f"batch-{batch_size}"), max_steps=1,
+            per_device_train_batch_size=batch_size, gradient_accumulation_steps=accumulation,
+            learning_rate=0.1, optim="sgd", max_grad_norm=0, weight_decay=0,
+            use_cpu=True, save_strategy="no", logging_strategy="no", disable_tqdm=True,
+            remove_unused_columns=False, label_names=["labels"], report_to="none", seed=17)
+        trainer = BaseTrainer(model=model, args=args, train_dataset=dataset,
+            data_collator=CriticBatcher(tokenizer if mode == "lora" else None))
+        trainer.train()
+        updates.append({name: parameter.detach().clone() for name, parameter in model.named_parameters()
+                        if parameter.requires_grad})
+    for accumulated in updates[1:]:
+        for name, expected in updates[0].items():
+            torch.testing.assert_close(accumulated[name], expected, atol=1e-6, rtol=1e-5, msg=name)
