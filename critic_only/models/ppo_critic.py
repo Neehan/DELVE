@@ -1,4 +1,4 @@
-"""Direct continuation probabilities with one head shared across history types."""
+"""Predict final answer correctness directly from the encoded trajectory."""
 
 import torch
 from torch import Tensor, nn
@@ -9,13 +9,32 @@ from critic_only.models.models import CriticConfig
 
 
 class PPOCritic(BaseCritic):
-    """Predict success from the supplied history; PPOOracleCritic shares this same head."""
+    """Learn final success probability with one linear head after the shared MLP.
 
-    def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
-        """Use identical head capacity for the PPOCritic and PPOOracleCritic baselines."""
-        super().__init__(model, hidden_size, settings)
-        self.head = nn.Linear(hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
+    predict implements the direct head; BaseCritic supplies forward, loss, and checkpoints. The training CLI selects unaided trajectories for this variant. PPOOracleCritic reuses the architecture with additional oracle trajectories.
+    """
+
+    def __init__(self, settings: CriticConfig) -> None:
+        """Add a linear success head after the shared MLP.
+
+        Args:
+            settings: Critic settings; hidden_size is the MLP width entering this head.
+
+        Returns:
+            None.
+        """
+        super().__init__(settings)
+        self.prediction_head = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
 
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Return one terminal logit; remaining budget is already included in the encoded prompt."""
-        return self.head(hidden).float().squeeze(-1)
+        """Predict final correctness directly from each encoded history.
+
+        Args:
+            hidden: MLP outputs [N, hidden_size]. N includes both reference versions.
+            oracle: Solver-sketch flags [N]; unused here because the sketch is already in the encoded history. Kept for the common critic interface.
+            remaining_blocks: Future budgets [N]; unused here because the prompt already contains the budget. DE uses this argument explicitly.
+
+        Returns:
+            Tensor: Float32 logits [N]. Apply sigmoid for probabilities, but not before computing the loss.
+        """
+        return self.prediction_head(hidden).float().squeeze(-1)

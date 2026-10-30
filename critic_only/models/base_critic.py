@@ -1,44 +1,51 @@
-"""Shared critic construction, checkpoints, history encoding, and terminal-outcome loss."""
+"""Share the MLP, forward pass, loss, and checkpoint code used by all three critics."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Self
 
 import torch
-from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION, MODEL_FILENAME
+from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME
 from critic_only.models.models import CriticConfig
 
 
 class BaseCritic(nn.Module, ABC):
-    """Construct, restore, and score critics; subclasses implement predict."""
+    """Turn cached vectors or Qwen outputs into critic predictions.
 
-    def __init__(self, model: nn.Module, hidden_size: int, settings: CriticConfig) -> None:
-        """Share model execution and configuration across all critic heads."""
+    forward uses cached vectors when language_model is None; otherwise it runs Qwen with LoRA. Both paths use the same MLP. Subclasses implement predict; this base supplies the per-prediction loss and trainable-weight save/load methods.
+    """
+
+    def __init__(self, settings: CriticConfig) -> None:
+        """Build the shared two-layer GELU MLP.
+
+        language_model starts as None for cached-vector inputs. The loader attaches Qwen with adapters for LoRA mode.
+
+        Args:
+            settings: Input vector size, MLP width, loss weight, and checkpoint settings.
+
+        Returns:
+            None.
+        """
         super().__init__()
-        self.model = model
-        self.hidden_size = hidden_size
         self.settings = settings
-
-    @classmethod
-    def create_from_pretrained(cls, settings: CriticConfig, dtype: torch.dtype) -> Self:
-        """Build a pinned LoRA critic with FlashAttention-2; float32 CPU smoke tests use SDPA."""
-        attention = CPU_ATTENTION if dtype == torch.float32 else DEFAULT_ATTENTION
-        model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
-                                          dtype=dtype, attn_implementation=attention)
-        model.config.use_cache = False
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        adapter = LoraConfig(r=settings.lora_rank, lora_alpha=settings.lora_alpha, target_modules="all-linear")
-        adapted = get_peft_model(model, adapter)
-        return cls(adapted, model.config.hidden_size, settings)
+        self.language_model: nn.Module | None = None
+        self.hidden_state_projection = nn.Sequential(nn.Linear(settings.input_size, settings.hidden_size), nn.GELU(),
+                                   nn.Linear(settings.hidden_size, settings.hidden_size), nn.GELU())
 
     def load_from_weights(self, directory: Path) -> None:
-        """Restore saved LoRA adapters and critic heads into this model; Trainer restores optimizer state."""
+        """Restore saved trainable weights into this already constructed critic.
+
+        The configuration, parameter names, and shapes must match before any weights are copied.
+
+        Args:
+            directory: Checkpoint directory containing critic configuration and safetensors weights.
+
+        Returns:
+            None. Updates the MLP, prediction heads, and any adapters; Trainer restores optimizer state separately.
+        """
         settings = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
         if settings != self.settings:
             raise ValueError("critic checkpoint configuration differs")
@@ -54,39 +61,70 @@ class BaseCritic(nn.Module, ABC):
                 parameter.copy_(weights[name])
 
     def save(self, directory: Path) -> None:
-        """Save adapters, prediction heads, and configuration; Trainer owns optimizer/RNG state."""
+        """Save the critic settings and trainable weights.
+
+        Includes the MLP, prediction heads, and any LoRA adapters. Frozen Qwen weights are identified by model revision rather than copied into each checkpoint.
+
+        Args:
+            directory: Destination checkpoint directory, created if needed.
+
+        Returns:
+            None. Writes configuration and safetensors files.
+        """
         directory.mkdir(parents=True, exist_ok=True)
         weights = {name: parameter.detach().cpu().contiguous() for name, parameter in self.named_parameters()
                    if parameter.requires_grad}
         save_file(weights, str(directory / MODEL_FILENAME))
         (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
 
-    def forward(self, input_ids: Tensor, attention_mask: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Read the whole history once and map its last non-padding hidden state to a terminal-value logit."""
-        output = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        positions = attention_mask.sum(dim=-1) - 1
-        hidden = output.last_hidden_state[torch.arange(input_ids.shape[0], device=input_ids.device), positions]
-        return self.predict(hidden.float(), oracle, remaining_blocks)
+    def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
+        """Convert each input into a vector, apply the MLP, and predict final answer correctness.
+
+        N counts both versions of the inputs. Frozen mode uses saved vectors; LoRA computes Qwen's last non-padding token vector with gradients. Neither path generates text.
+
+        Args:
+            inputs: Cached hidden_state [N, input_size], or LoRA input_ids and attention_mask [N, L]. Tokens are right-padded; mask entries are 1 for real tokens and 0 for padding.
+            oracle: Solver-sketch flags [N], not flags for critic-only references.
+            remaining_blocks: Budget left after each history [N]. Paired reference inputs share the same budget.
+
+        Returns:
+            Tensor: Float32 success logits [N]; sigmoid gives probabilities.
+        """
+        if self.language_model is None:
+            hidden_states = inputs["hidden_state"]
+        else:
+            output = self.language_model(**inputs, use_cache=False)
+            positions = inputs["attention_mask"].sum(dim=-1) - 1
+            hidden_states = output.last_hidden_state[torch.arange(len(positions), device=positions.device), positions]
+        projected = self.hidden_state_projection(hidden_states.float())
+        return self.predict(projected, oracle, remaining_blocks)
 
     @abstractmethod
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Return one terminal-value logit per history [views]; DE uses remaining_blocks to select its horizon."""
+        """Map MLP outputs to final-success logits; each critic variant implements this.
+
+        Args:
+            hidden: MLP outputs [N, settings.hidden_size], including both reference versions.
+            oracle: Solver-sketch flags [N]; DE uses these to select execution-only predictions.
+            remaining_blocks: Future budget [N], from 1 through settings.horizon - 1.
+
+        Returns:
+            Tensor: Float32 logits [N], before sigmoid. These go directly into the binary cross-entropy loss.
+        """
         raise NotImplementedError
 
     def loss(self, logits: Tensor, labels: Tensor, oracle: Tensor) -> Tensor:
-        """Compute binary cross-entropy for each observed solver history.
+        """Measure prediction error against the trajectory's final correct/incorrect answer.
+
+        This computes binary cross-entropy for each supplied prediction. It does not average examples or pair reference inputs; BaseTrainer.compute_loss does that.
 
         Args:
-            logits: Predicted terminal success logits [examples] for each actual history.
-            labels: Binary final correctness [examples]. Success grades the last answer when the remaining budget is exhausted, not any earlier answer.
-            oracle: Boolean mask [examples] identifying histories with an injected sketch, used only for loss weighting.
-
-        For label y and probability p = sigmoid(logit), the loss is -y*log(p) - (1-y)*log(1-p). Compute directly from logits for numerical stability. Earlier checkpoint grades are not auxiliary targets.
-
-        Oracle examples receive oracle_weight; unaided examples receive weight one. PPOCritic training excludes oracle examples before batching.
+            logits: Predicted success logits [N]; sigmoid(logit) is the probability of success.
+            labels: Final answer correctness [N]: 1 for correct, 0 for incorrect.
+            oracle: Solver-sketch flags [N]. True applies settings.oracle_weight to that loss. A critic-only reference solution does not change this flag.
 
         Returns:
-            Losses [examples], without batch averaging. BaseTrainer averages the paired reference/no-reference losses for each example, then averages examples. Critic-only references and solver-visible sketches are distinct inputs.
+            Tensor: Float32 losses [N], one per prediction. Computed directly from logits for numerical stability.
         """
         losses = F.binary_cross_entropy_with_logits(logits.float(), labels.float(), reduction="none")
         weight = torch.where(oracle, self.settings.oracle_weight, 1.0)
