@@ -1,12 +1,15 @@
 """Check HF hidden-state prediction, exact vector alignment, and chunk resume."""
 
+import gc
 import os
 import socket
 import subprocess
 import sys
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -100,6 +103,47 @@ def test_corrupt_input_hash_rejected(critic_settings: Callable[[str], CriticConf
     with pytest.raises(ValueError, match="token IDs changed"):
         HiddenStateRunner(CriticInputStorage(tmp_path), HiddenStateStorage(tmp_path),
                           prediction_trainer(model, tokenizer, tmp_path, 2)).run()
+
+
+@pytest.mark.parametrize("failed_prediction", [False, True])
+def test_completed_chunks_release_loaders(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+    token_rows: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_prediction: bool) -> None:
+    """Release each prediction loader and dataset, including after errors, while keeping Qwen prepared."""
+    shards = save_token_chunks(tmp_path, token_rows, 2)
+    model = AutoModel.from_pretrained(critic_settings("ppo-critic").model)
+    trainer = prediction_trainer(model, tokenizer, tmp_path, 2)
+    inputs = CriticInputStorage(tmp_path)
+    runner = HiddenStateRunner(inputs, HiddenStateStorage(tmp_path), trainer)
+    retained: list[weakref.ReferenceType[Any]] = []
+    get_loader = trainer.get_test_dataloader
+
+    def track_loader(*args: Any, **kwargs: Any) -> Any:
+        """Observe object lifetimes without keeping the loader or its dataset alive."""
+        loader = get_loader(*args, **kwargs)
+        retained.extend((weakref.ref(loader), weakref.ref(loader.dataset)))
+        return loader
+
+    def fail_forward(*args: Any, **kwargs: Any) -> Any:
+        """Simulate a model failure after its input loader has been prepared."""
+        raise RuntimeError("prediction failed")
+
+    monkeypatch.setattr(trainer, "get_test_dataloader", track_loader)
+    prepare_model = Mock(wraps=trainer.accelerator.prepare_model)
+    monkeypatch.setattr(trainer.accelerator, "prepare_model", prepare_model)
+    if failed_prediction:
+        monkeypatch.setattr(model, "forward", fail_forward)
+    for name, digest in shards.items():
+        rows = inputs.read_chunk(name, digest)
+        if failed_prediction:
+            with pytest.raises(RuntimeError, match="prediction failed"):
+                runner._encode_chunk(rows)
+        else:
+            assert len(runner._encode_chunk(rows)) == len(rows)
+        gc.collect()
+        assert not trainer.accelerator._dataloaders
+        assert all(reference() is None for reference in retained)
+        assert len(trainer.accelerator._models) == 1
+    assert prepare_model.call_count == 1
 
 
 def test_incomplete_cache_resumes_missing_chunks(critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,

@@ -64,7 +64,13 @@ class HiddenStateRunner:
         sequences = [row["input_ids"] for row in rows] + [rows[index]["privileged_input_ids"] for index in reference_indices]
         order = np.argsort([len(tokens) for tokens in sequences], kind="stable")
         inputs = Dataset.from_dict({"input_ids": [sequences[index] for index in order]})
-        predictions = np.asarray(self.trainer.predict(cast(Any, inputs)).predictions)
+        dataloader_count = len(self.trainer.accelerator._dataloaders)
+        try:
+            predictions = np.asarray(self.trainer.predict(cast(Any, inputs)).predictions)
+        finally:
+            # Accelerate retains prediction loaders; release this chunk's loaders while keeping Qwen prepared.
+            del self.trainer.accelerator._dataloaders[dataloader_count:]
+            self.trainer.callback_handler.eval_dataloader = None
         if predictions.ndim != 2 or len(predictions) != len(sequences) or not np.isfinite(predictions).all():
             raise ValueError("encoding must return one finite hidden vector per input")
         vectors = predictions[np.argsort(order)].tolist()
