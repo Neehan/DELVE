@@ -125,6 +125,8 @@ def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
         encoded = examples.map(formatter.encode, fn_kwargs={"settings": settings},
                                remove_columns=examples.column_names, load_from_cache_file=False)
         CriticInputStorage(directory).save_inputs(encoded, tokenizer, settings)
+        # Close Arrow memory maps before removing their temporary files on shared filesystems.
+        del encoded, examples
 
 
 def main() -> None:

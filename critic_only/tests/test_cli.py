@@ -1,9 +1,12 @@
 """Exercise setup, hidden-state caching, frozen/LoRA training, and evaluation without network or GPU dependencies."""
 
 import json
+import weakref
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, Iterator
 from unittest.mock import Mock
 
 import pyarrow as pa
@@ -15,6 +18,36 @@ from critic_only.cli import cache_hidden_states, evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
+
+
+@pytest.fixture
+def temporary_dataset_lifetimes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require temporary Arrow datasets to close before their cache directory is removed."""
+    references: list[weakref.ReferenceType[Dataset]] = []
+    generate, map_dataset = Dataset.from_generator, Dataset.map
+
+    def track_generated(*args: Any, **kwargs: Any) -> Dataset:
+        """Observe the source dataset without keeping its memory maps alive."""
+        dataset = generate(*args, **kwargs)
+        references.append(weakref.ref(dataset))
+        return dataset
+
+    def track_mapped(dataset: Dataset, *args: Any, **kwargs: Any) -> Dataset:
+        """Observe the tokenized dataset without retaining it."""
+        encoded = map_dataset(dataset, *args, **kwargs)
+        references.append(weakref.ref(encoded))
+        return encoded
+
+    @contextmanager
+    def checked_directory(*args: Any, **kwargs: Any) -> Iterator[str]:
+        """Check resource lifetimes before cleanup, including on filesystems that allow open-file deletion."""
+        with TemporaryDirectory(*args, **kwargs) as directory:
+            yield directory
+            assert references and all(reference() is None for reference in references)
+
+    monkeypatch.setattr(Dataset, "from_generator", track_generated)
+    monkeypatch.setattr(Dataset, "map", track_mapped)
+    monkeypatch.setattr(setup, "TemporaryDirectory", checked_directory)
 
 
 def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]) -> None:
@@ -81,7 +114,7 @@ def test_bad_training_fraction_fails_early(fraction: str, monkeypatch: pytest.Mo
 
 
 def test_setup_and_extraction_cli(prepared_inputs: CollectionFixture, critic_settings: Callable[[str], CriticConfig],
-    tokenizer: PreTrainedTokenizerFast, monkeypatch: pytest.MonkeyPatch) -> None:
+    tokenizer: PreTrainedTokenizerFast, monkeypatch: pytest.MonkeyPatch, temporary_dataset_lifetimes: None) -> None:
     """Shared setup does not load Qwen; extraction pins one model and reuses its exact token cache."""
     settings = critic_settings("ppo-critic")
     tokenizer.save_pretrained(settings.model)
