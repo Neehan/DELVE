@@ -225,6 +225,7 @@ __marimo__/
 /output/
 /logs/
 AGENTS.md
+mit_slurm.md
 
 # Local research papers
 /related_work/
