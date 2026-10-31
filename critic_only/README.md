@@ -10,7 +10,7 @@ Train a critic to predict final-answer correctness from a partial solver traject
 
 **Workflow:** setup → cache hidden states → train → evaluate. Setup writes reusable Parquet chunks and tokenizes both input versions. The seed-1234 problem split reserves 1,000 pre-2026 problems for training, remaining older problems for validation, and 2026 onward for test.
 
-Frozen mode trains a two-layer, width-512 GELU MLP on cached Qwen vectors. For LoRA, skip hidden-state caching and pass `--training-mode lora` to train. The solver stays fixed in both modes.
+Frozen mode trains a two-layer, width-512 GELU MLP on cached Qwen vectors. For LoRA, skip hidden-state caching and pass `--training-mode lora` to train; set `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce CUDA memory fragmentation with varying input lengths. The solver stays fixed in both modes.
 
 Run from the repository root with matching problem files in `data/datasets`. Use a separate environment from vLLM; GPU encoding and LoRA require a compatible `flash-attn` installation in addition to the dependencies below.
 
