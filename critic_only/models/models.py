@@ -21,6 +21,7 @@ class CriticConfig(BaseModel):
         training_mode: frozen reads cached vectors; lora runs Qwen with trainable adapters.
         lora_rank: Adapter rank in LoRA mode; None in frozen mode.
         lora_alpha: Adapter scaling numerator (scale = alpha/rank); unrelated to DE alpha. None in frozen mode.
+        lora_layers: Number of final transformer layers to adapt; None adapts all layers in LoRA mode.
         oracle_weight: Loss multiplier for solver histories containing sketches; unaided weight is one.
 
     validate_adapter_settings checks that adapter options match training_mode. The configuration is saved with each checkpoint.
@@ -37,6 +38,7 @@ class CriticConfig(BaseModel):
     training_mode: Literal["frozen", "lora"]
     lora_rank: int | None = Field(gt=0)
     lora_alpha: int | None = Field(gt=0)
+    lora_layers: int | None = Field(default=None, gt=0)
     oracle_weight: float = Field(ge=0)
 
     @model_validator(mode="after")
@@ -48,6 +50,7 @@ class CriticConfig(BaseModel):
         """
         if self.training_mode == "lora" and (self.lora_rank is None or self.lora_alpha is None):
             raise ValueError("LoRA requires rank and alpha")
-        if self.training_mode == "frozen" and (self.lora_rank is not None or self.lora_alpha is not None):
+        if self.training_mode == "frozen" and any(value is not None for value in
+                                                 (self.lora_rank, self.lora_alpha, self.lora_layers)):
             raise ValueError("frozen critics do not use LoRA settings")
         return self

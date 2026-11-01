@@ -17,7 +17,7 @@ from critic_only.models.ppo_critic import PPOCritic
 def create_critic(settings: CriticConfig, cpu: bool) -> BaseCritic:
     """Build the selected prediction heads and optionally attach Qwen with LoRA.
 
-    Frozen mode loads no Qwen weights. LoRA freezes pretrained Qwen weights and enables all-linear adapters and gradient checkpointing. Trainer handles device placement.
+    Frozen mode loads no Qwen weights. LoRA adapts all linear projections in the selected final transformer layers, freezes pretrained weights, and enables gradient checkpointing. Trainer handles device placement.
 
     Args:
         settings: Critic variant, dimensions, input-cache identity, and frozen/LoRA settings.
@@ -33,7 +33,17 @@ def create_critic(settings: CriticConfig, cpu: bool) -> BaseCritic:
                                           dtype=torch.float32 if cpu else torch.bfloat16,
                                           attn_implementation=CPU_ATTENTION if cpu else DEFAULT_ATTENTION)
         model.config.use_cache = False
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        adapters = LoraConfig(r=cast(int, settings.lora_rank), lora_alpha=cast(int, settings.lora_alpha), target_modules="all-linear")
+        # PEFT's all-linear target supports module exclusions, but not layers_to_transform.
+        excluded_modules = None
+        if settings.lora_layers is not None:
+            frozen_layers = range(max(0, model.config.num_hidden_layers - settings.lora_layers))
+            if frozen_layers:
+                layer_indices = "|".join(str(index) for index in frozen_layers)
+                excluded_modules = rf"(?:.*\.)?layers\.(?:{layer_indices})\..*"
+        adapters = LoraConfig(r=cast(int, settings.lora_rank), lora_alpha=cast(int, settings.lora_alpha),
+                              target_modules="all-linear", exclude_modules=excluded_modules)
         critic.language_model = get_peft_model(model, adapters)
+        # Non-reentrant checkpointing supports adapter gradients without embedding-output gradients.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.disable_input_require_grads()
     return critic

@@ -21,7 +21,7 @@ from critic_only.constants import (
     DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     TRAINING_DIRECTORY, VARIANTS, DEFAULT_ORACLE_SUPERVISION_FRACTION,
     TRAINING_MODES, DEFAULT_TRAINING_MODE, DEFAULT_LORA_RANK, DEFAULT_LORA_ALPHA,
-    DEFAULT_LORA_BATCH_SIZE, DEFAULT_LORA_ACCUMULATION_STEPS,
+    DEFAULT_LORA_BATCH_SIZE, DEFAULT_LORA_ACCUMULATION_STEPS, DEFAULT_LORA_LAYERS,
 )
 from critic_only.data.critic_input_processor import select_training_problems, select_unaided_examples, selection_fraction
 from critic_only.data.hidden_state_dataset import HiddenStateDataset
@@ -60,6 +60,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--training-mode", choices=TRAINING_MODES, default=DEFAULT_TRAINING_MODE)
     parser.add_argument("--lora-rank", type=int)
     parser.add_argument("--lora-alpha", type=int)
+    parser.add_argument("--lora-layers", type=int,
+                        help="adapt the last N transformer layers, counting backward from the final layer; "
+                             f"defaults to {DEFAULT_LORA_LAYERS}; counts at or above model depth adapt all layers")
     args = parser.parse_args()
     configure_training_mode(args)
     if min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
@@ -82,7 +85,7 @@ def configure_training_mode(args: argparse.Namespace) -> None:
         None. Frozen mode uses large vector batches; LoRA uses small token batches with accumulation.
     """
     lora = args.training_mode == "lora"
-    if not lora and (args.lora_rank is not None or args.lora_alpha is not None):
+    if not lora and any(value is not None for value in (args.lora_rank, args.lora_alpha, args.lora_layers)):
         raise ValueError("LoRA options require --training-mode lora")
     if args.batch_size is None:
         args.batch_size = DEFAULT_LORA_BATCH_SIZE if lora else DEFAULT_BATCH_SIZE
@@ -91,8 +94,9 @@ def configure_training_mode(args: argparse.Namespace) -> None:
     if lora:
         args.lora_rank = DEFAULT_LORA_RANK if args.lora_rank is None else args.lora_rank
         args.lora_alpha = DEFAULT_LORA_ALPHA if args.lora_alpha is None else args.lora_alpha
-        if min(args.lora_rank, args.lora_alpha) <= 0:
-            raise ValueError("LoRA rank and alpha must be positive")
+        args.lora_layers = DEFAULT_LORA_LAYERS if args.lora_layers is None else args.lora_layers
+        if min(args.lora_rank, args.lora_alpha, args.lora_layers) <= 0:
+            raise ValueError("LoRA rank, alpha, and layer count must be positive")
 
 
 def training_arguments(args: argparse.Namespace) -> TrainingArguments:
@@ -162,7 +166,7 @@ def main() -> None:
                             horizon=cached["horizon"], input_size=cached["hidden_size"],
                             hidden_size=args.hidden_size, data_signature=input_signature(manifest, args.training_mode),
                             training_mode=args.training_mode, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-                            oracle_weight=args.oracle_weight)
+                            lora_layers=args.lora_layers, oracle_weight=args.oracle_weight)
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
     dataset["train"] = select_training_problems(dataset["train"], args.training_problem_fraction)

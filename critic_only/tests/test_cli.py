@@ -137,6 +137,28 @@ def test_setup_and_extraction_cli(prepared_inputs: CollectionFixture, critic_set
     api.model_info.assert_called_once()
 
 
+@pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("frozen", "1")])
+def test_invalid_lora_layers(mode: str, count: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject nonpositive layer counts and LoRA layer selection for frozen training before loading data."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--lora-layers", count])
+    with pytest.raises(ValueError, match="LoRA"):
+        train.parse_arguments()
+
+
+def test_lora_layers_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass the requested final-layer count through the training CLI."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "lora", "--lora-layers", "1"])
+    assert train.parse_arguments().lora_layers == 1
+
+
+def test_default_lora_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default LoRA to 64 final layers while keeping frozen mode free of adapter settings."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "lora"])
+    assert train.parse_arguments().lora_layers == 64
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused"])
+    assert train.parse_arguments().lora_layers is None
+
+
 def test_pinned_hf_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Remote preparation downloads only collection artifacts for the selected model at one revision."""
     api = Mock(); api.dataset_info.return_value.sha = "commit"
