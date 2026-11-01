@@ -9,9 +9,9 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 from scipy.special import logit
-from transformers import EvalPrediction, PreTrainedTokenizerFast
+from transformers import EvalPrediction, PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
-from critic_only.constants import MODEL_FILENAME
+from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME
 from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
@@ -231,3 +231,45 @@ def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfi
     assert any(torch.count_nonzero(cast(torch.Tensor, parameter.grad)).item() > 0 for parameter in adapters)
     assert all(not parameter.requires_grad and parameter.grad is None
                for name, parameter in parameters.items() if "lora_" not in name)
+
+
+@pytest.mark.parametrize("layer_count,expected_layers", [(1, {2}), (2, {1, 2}), (3, {0, 1, 2}),
+                                                       (10, {0, 1, 2}), (None, {0, 1, 2})])
+def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int],
+                              critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+                              token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+    """Only selected final layers receive adapters; gradients and checkpoint restoration remain correct."""
+    settings = critic_settings("ppo-critic")
+    config = Qwen3Config.from_pretrained(settings.model)
+    config.num_hidden_layers = 3
+    config.layer_types = ["full_attention"] * config.num_hidden_layers
+    directory = tmp_path / "three-layer-model"
+    Qwen3Model(config).save_pretrained(directory)
+    settings = settings.model_copy(update={"model": str(directory), "training_mode": "lora",
+                                           "lora_rank": 2, "lora_alpha": 4, "lora_layers": layer_count})
+    model = create_critic(settings, True)
+    batch = CriticBatcher(tokenizer)(token_rows)
+    model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).sum().backward()
+    assert model.language_model is not None
+    embedding_layer = model.language_model.get_submodule("base_model.model.embed_tokens")
+    embeddings = embedding_layer(batch["inputs"]["input_ids"])
+    assert not embeddings.requires_grad
+    parameters = dict(model.language_model.named_parameters())
+    adapted_layers = {int(name.split("layers.")[1].split(".")[0])
+                      for name in parameters if "lora_" in name}
+    assert adapted_layers == expected_layers
+    for name, parameter in parameters.items():
+        assert parameter.requires_grad == ("lora_" in name)
+        assert (parameter.grad is not None) == ("lora_" in name)
+    torch.optim.SGD(model.parameters(), lr=0.1).step()
+    model.eval()
+    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    checkpoint = tmp_path / "checkpoint"
+    model.save(checkpoint)
+    saved_settings = CriticConfig.model_validate_json((checkpoint / CONFIG_FILENAME).read_text())
+    assert saved_settings.lora_layers == layer_count
+    restored = create_critic(saved_settings, True)
+    restored.load_from_weights(checkpoint)
+    restored.eval()
+    actual = restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    torch.testing.assert_close(actual, expected)
