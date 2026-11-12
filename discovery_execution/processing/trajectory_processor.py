@@ -11,7 +11,7 @@ from typing import Any
 import zstandard
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK,
+    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, CONTINUATION_EXPERIMENTS,
 )
 from discovery_execution.harness.models import RunState
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLITS, TRAJECTORIES_SUBDIRECTORY
@@ -40,11 +40,12 @@ class TrajectoryProcessor:
         self.source, self.destination = source, destination
         self.solver_model, self.splits = solver_model, splits
 
-    def compile_trajectories(self, source_revision: str | None) -> None:
+    def compile_trajectories(self, source_revision: str | None, continuation_seeds: tuple[int, ...]) -> None:
         """Pack complete solver runs into Parquet chunks and write their manifest.
 
         Args:
             source_revision: Repository@commit provenance for downloaded outputs, or None for local outputs.
+            continuation_seeds: Child seeds to include; other continuation runs are skipped before reading artifacts.
 
         Returns:
             None. Writes trajectory shards and their manifest, saving shared problem assignments if they do not exist.
@@ -54,6 +55,8 @@ class TrajectoryProcessor:
         partitions: dict[str, list[Path]] = {split: [] for split in SPLITS}
         for path in sorted(self.source.rglob(META_FILENAME)):
             metadata = json.loads(path.read_text())
+            if metadata["experiment"] in CONTINUATION_EXPERIMENTS and metadata["seed"] not in continuation_seeds:
+                continue
             if metadata["model"] == self.solver_model:
                 key = f"{metadata['competition']}/{metadata['year']}/{metadata['problem_id']}"
                 partitions[self.splits.assignments[key]].append(path.parent)

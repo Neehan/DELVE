@@ -10,7 +10,7 @@ from torch.utils.data import Dataset as TorchDataset
 class HiddenStateDataset(TorchDataset):
     """Keep the selected hidden vectors in CPU RAM throughout training.
 
-    Indexing returns one trajectory's vectors, label, sketch flag, and remaining budget. CriticBatcher combines these records into minibatches, so training does not reread Parquet files each step.
+    Indexing returns one prefix's vectors, label, sketch flag, and remaining budget. CriticBatcher combines these records into minibatches, so training does not reread Parquet files each step.
     """
 
     def __init__(self, dataset: Dataset) -> None:
@@ -34,7 +34,7 @@ class HiddenStateDataset(TorchDataset):
         self.remaining_blocks = list(dataset["remaining_blocks"])
 
     def __len__(self) -> int:
-        """Count trajectories, counting a reference pair as one example.
+        """Count prefixes, counting a reference pair as one example.
 
         Returns:
             int: Number of branch examples; a reference-conditioned view does not count as another example.
@@ -42,13 +42,13 @@ class HiddenStateDataset(TorchDataset):
         return len(self.labels)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        """Return one trajectory's cached vectors and training label.
+        """Return one prefix's cached vectors and training label.
 
         Args:
             index: Zero-based position of a branch example in the selected dataset.
 
         Returns:
-            dict[str, Any]: Ordinary vector, optional reference vector, binary label, oracle flag, and remaining blocks for CriticBatcher.
+            dict[str, Any]: Ordinary vector, optional reference vector, success-fraction label, oracle flag, and remaining blocks for CriticBatcher.
         """
         return {"hidden_state": self.hidden_states[index], "privileged_hidden_state": self.privileged_hidden_states[index] if self.reference_available[index] else None,
                 "labels": self.labels[index], "oracle": self.oracle[index], "remaining_blocks": self.remaining_blocks[index]}

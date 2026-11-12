@@ -30,7 +30,7 @@ class PPOCritic(BaseCritic):
         """Predict final correctness directly from each encoded history.
 
         Args:
-            hidden: MLP outputs [N, hidden_size]. N includes both reference versions.
+            hidden: MLP outputs [N, hidden_size]. N is the number of input prefixes.
             oracle: Solver-sketch flags [N]; unused here because the sketch is already in the encoded history. Kept for the common critic interface.
             remaining_blocks: Future budgets [N]; unused here because the prompt already contains the budget. DE uses this argument explicitly.
 

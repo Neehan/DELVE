@@ -1,6 +1,6 @@
 """Build critic prompts and save their token IDs, with and without a reference solution.
 
-The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share one final correctness label, kept outside the prompt.
+The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the observed continuation success fraction, kept outside the prompt.
 """
 
 import hashlib
@@ -36,7 +36,7 @@ class PrefixTokenizer:
     def encode(self, row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         """Create token inputs with and without the matching reference solution.
 
-        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. Each branch supplies one scalar final binary outcome; earlier grades are neither inputs nor training targets.
+        The history is quoted in a user message so templates cannot strip assistant reasoning. The optional reference and its calibration instructions extend only the privileged system message. The label is the mean final correctness across independent continuations. Neither their reasoning nor their outcomes enter the prompt.
 
         Args:
             row: Serialized InputPrefix containing observed messages, matching reference, metadata, and a separate final label.
@@ -62,7 +62,9 @@ class PrefixTokenizer:
                 "input_hash": token_digest(token_ids),
                 "privileged_input_hash": token_digest(privileged_ids) if privileged_ids is not None else None,
                 "split": record.split,
-                "labels": record.branch.final_correctness, "remaining_blocks": record.remaining_blocks,
+                "labels": sum(branch.final_correctness for branch in record.branches) / len(record.branches),
+                "branches": [branch.model_dump() for branch in record.branches],
+                "remaining_blocks": record.remaining_blocks,
                 "length": len(privileged_ids) if privileged_ids is not None else len(token_ids),
                 "prefix_id": record.prefix_id, "problem_key": record.problem_key,
                 "oracle": record.oracle}

@@ -38,7 +38,7 @@ class DECritic(BaseCritic):
         Unaided rows use the mixture defined in the class docstring. Oracle rows use epsilon_r alone. Log-space calculation avoids underflow in small probabilities.
 
         Args:
-            hidden: MLP outputs [N, hidden_size], including both reference versions.
+            hidden: MLP outputs [N, hidden_size], one per input prefix.
             oracle: Solver-sketch flags [N]. True selects execution alone; a critic-only reference does not set this flag.
             remaining_blocks: Future budget [N], from 1 to self.horizons; selects epsilon_r and limits discovery delays.
 

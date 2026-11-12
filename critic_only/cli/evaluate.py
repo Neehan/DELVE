@@ -1,6 +1,6 @@
 """Evaluate a saved critic and write metrics.json and predictions.parquet.
 
-Use unaided trajectories from the requested split and report scores with and without critic-only reference solutions separately. Frozen mode reads vectors; LoRA mode reads tokens and loads Qwen.
+Use unaided prefixes from the requested split with reference solutions visible to the critic. Frozen mode reads vectors; LoRA mode reads tokens and loads Qwen.
 """
 
 import argparse
@@ -31,33 +31,27 @@ from critic_only.trainer.base_trainer import BaseTrainer
 
 
 def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.Namespace) -> None:
-    """Save per-trajectory probabilities and aggregate scores for both reference versions.
+    """Save reference-conditioned probabilities and aggregate scores.
 
     Args:
-        result: Trainer predictions: ordinary logits, privileged logits, availability mask, and binary labels.
+        result: Trainer predictions: one logit per prefix and its success-fraction target.
         dataset: Evaluated examples in prediction order, including IDs, problem keys, and remaining budgets.
         args: CLI settings naming the checkpoint, evaluated split, and report destination.
 
     Returns:
         None. Writes metrics.json and per-example predictions.parquet to the report directory.
     """
-    logits, privileged_logits, available = cast(tuple[np.ndarray, np.ndarray, np.ndarray], result.predictions)
+    logits = np.asarray(result.predictions)
     labels = np.asarray(result.label_ids)
-    mask = np.asarray(available, dtype=bool)
     keys = dataset["problem_key"]
-    report = {"checkpoint": str(args.checkpoint), "split": args.split,
-              "without_reference": evaluation_report(logits, labels, keys), "with_reference": None}
-    if mask.any():
-        report["with_reference"] = evaluation_report(privileged_logits[mask], labels[mask],
-                                                     [key for key, present in zip(keys, mask) if present])
+    report = {"checkpoint": str(args.checkpoint), "split": args.split, "reference_solution": True,
+              **evaluation_report(logits, labels, keys)}
     args.destination.mkdir(parents=True, exist_ok=True)
     (args.destination / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
-    privileged = [probability.tolist() if present else None
-                  for probability, present in zip(expit(privileged_logits), mask)]
     Dataset.from_dict({"prefix_id": dataset["prefix_id"], "problem_key": keys,
                        "remaining_blocks": dataset["remaining_blocks"],
-                       "probability": expit(logits).tolist(), "privileged_probability": privileged,
-                       "final_correctness": labels.tolist()}).to_parquet(str(args.destination / "predictions.parquet"))
+                       "probability": expit(logits).tolist(),
+                       "success_fraction": labels.tolist(), "branches": dataset["branches"]}).to_parquet(str(args.destination / "predictions.parquet"))
 
 
 def main() -> None:

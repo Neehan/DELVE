@@ -106,14 +106,14 @@ def prepared_inputs(tmp_path: Path) -> CollectionFixture:
                   [messages, messages + [{"role": "assistant", "content": "Parent later reasoning"}],
                    messages + [{"role": "assistant", "content": "Parent later reasoning FINAL FUTURE"}]], [1, 1, 0])
         for condition in ("continue", "continue-oracle"):
-            for seed in range(2):
+            for seed in range(8):
                 branch = model_root / f"{condition}-at-1x" / problem["problem_id"] / "seed_0" / f"branch_{seed}"
                 metadata = {**common, "experiment": condition, "seed": seed, "source_seed": 0, "source_arm": "unaided-3x",
                             "continue_at": 1, "solution_index": 0}
                 continued = messages + [{"role": "user", "content": "Use symmetry."}] if condition == "continue-oracle" else messages
                 observed = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed}"}]
                 final = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed} FINAL FUTURE"}]
-                write_run(branch, metadata, [observed, final], [1, seed])
+                write_run(branch, metadata, [observed, final], [1, seed % 2])
     extra = {**json.loads((references / "2025.jsonl").read_text()), "problem_id": "AIME-2025-I-2"}
     with (references / "2025.jsonl").open("a") as file:
         file.write(json.dumps(extra) + "\n")
@@ -139,16 +139,25 @@ def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": 0},
+             "oracle": False, "remaining_blocks": 2, "labels": 0.5,
+             "branches": [{"seed": 0, "final_correctness": 0, "path": "branch0"},
+                          {"seed": 1, "final_correctness": 1, "path": "branch1"}]},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "remaining_blocks": 1, "labels": 1}]
+             "oracle": False, "remaining_blocks": 1, "labels": 1.,
+             "branches": [{"seed": 0, "final_correctness": 1, "path": "branch0"}]}]
 
 
 @pytest.fixture
-def training_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Use fixed vectors with one missing reference to exercise paired loss weighting."""
+def reference_token_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Supply every pilot training row with a reference while retaining both cached views."""
+    return [{**row, "privileged_input_ids": [2, 3, 3, 2], "length": 4} for row in token_rows]
+
+
+@pytest.fixture
+def training_rows(reference_token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use distinct ordinary and reference vectors to verify reference-only training."""
     return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
              "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
-             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"]}
-            for index, row in enumerate(token_rows)]
+             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branches": row["branches"]}
+            for index, row in enumerate(reference_token_rows)]

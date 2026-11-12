@@ -1,4 +1,4 @@
-"""Put each trajectory's inputs with and without a reference solution into one model batch."""
+"""Batch the reference-containing view of each prefix for critic training and evaluation."""
 
 from typing import Any
 
@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizerBase
 class CriticBatcher:
     """Batch tokens for LoRA or cached vectors for frozen training.
 
-    The first B inputs omit reference solutions. The next P include available references. privileged_indices maps those P extra inputs back to their original trajectories; for example, [0, 2] means only trajectories 0 and 2 have references. Both versions use the same final correctness label.
+    Each row supplies one reference-containing input and one success-fraction label. __call__ pads token sequences or stacks cached vectors and rejects missing references.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase | None) -> None:
@@ -26,25 +26,25 @@ class CriticBatcher:
         self.tokenizer = tokenizer
 
     def __call__(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """Put both reference versions into one batch while keeping one label per trajectory.
+        """Select one reference-containing input per row and assemble the model tensors.
 
         Args:
-            rows: Examples with tokens or vectors, optional reference inputs, labels, oracle flags, and remaining budgets.
+            rows: Examples with reference tokens or vectors, labels, oracle flags, and remaining budgets.
 
         Returns:
-            dict[str, Any]: Model inputs for B+P views, labels [B], privileged_indices [P], and oracle/budget tensors [B+P].
+            dict[str, Any]: Model inputs for B rows, labels [B], and oracle/budget tensors [B].
         """
         column = "input_ids" if self.tokenizer is not None else "hidden_state"
         reference_column = f"privileged_{column}"
-        indices = [index for index, row in enumerate(rows) if row[reference_column] is not None]
-        views = [row[column] for row in rows] + [rows[index][reference_column] for index in indices]
-        metadata = rows + [rows[index] for index in indices]
+        # Both views remain cached for future experiments; this pilot uses references only.
+        views = [row[reference_column] for row in rows]
+        if any(view is None for view in views):
+            raise ValueError("reference-only critic requires a reference input for every row")
         if self.tokenizer is None:
             inputs = {"hidden_state": torch.stack([torch.as_tensor(view, dtype=torch.float32) for view in views])}
         else:
             padded = self.tokenizer.pad([{"input_ids": view} for view in views], padding=True, return_tensors="pt")
             inputs = {name: value for name, value in padded.items() if name in {"input_ids", "attention_mask"}}
         return {"labels": torch.tensor([row["labels"] for row in rows], dtype=torch.float32), "inputs": inputs,
-                "privileged_indices": torch.tensor(indices, dtype=torch.long),
-                "oracle": torch.tensor([row["oracle"] for row in metadata], dtype=torch.bool),
-                "remaining_blocks": torch.tensor([row["remaining_blocks"] for row in metadata], dtype=torch.long)}
+                "oracle": torch.tensor([row["oracle"] for row in rows], dtype=torch.bool),
+                "remaining_blocks": torch.tensor([row["remaining_blocks"] for row in rows], dtype=torch.long)}

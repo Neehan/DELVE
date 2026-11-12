@@ -4,6 +4,10 @@ from pathlib import Path
 
 DEFAULT_SEED = 1234
 DEFAULT_HORIZON = 5
+INPUT_PREFIX_BLOCKS = 1
+CONTINUATION_SEEDS = tuple(range(8))
+CRITIC_TARGET = "shared-prefix-final-success"
+CRITIC_INPUT_VIEW = "reference-only"
 DEFAULT_HIDDEN_SIZE = 512
 DEFAULT_LEARNING_RATE = 3e-4
 DEFAULT_EPOCHS = 5

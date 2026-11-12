@@ -37,21 +37,21 @@ class BranchOutcome(BaseModel):
 
 
 class InputPrefix(BaseModel):
-    """Describe one trajectory after observing one block beyond its branch point.
+    """Describe a shared 1× state and the independent continuations that supervise it.
 
     Fields:
-        prefix_id: Unique trajectory/checkpoint identifier.
+        prefix_id: Source checkpoint and oracle-condition identifier; independent of child count.
         oracle: Whether the solver history contains an injected sketch.
         problem_key: Competition/year/problem ID used for splitting and scoring.
-        fork: Block where this continuation began; zero for runs from the problem alone.
+        fork: Shared source checkpoint in blocks.
         remaining_blocks: Solver budget left after the observed history.
         split: Fixed train, validation, or test assignment for this problem.
-        messages: Solver history visible to the critic, including any sketch and response.
+        messages: Exact source history plus an optional oracle hint, without child responses.
         phase: Solver phase at the checkpoint: solve, critique, or revise.
-        response_finished: Whether the last response ended naturally rather than hitting a limit.
+        response_finished: Whether the current phase ended naturally; false after a new hint.
         solution_index: Reference solution selected to match the sketch or source-seed round robin.
         reference_solution: Optional full solution supplied only to the critic.
-        branch: This trajectory's final label and identity; not included in the prompt.
+        branches: Independent final outcomes and identities, never included in the prompt.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -66,4 +66,4 @@ class InputPrefix(BaseModel):
     response_finished: bool
     solution_index: int = Field(ge=0)
     reference_solution: str | None
-    branch: BranchOutcome
+    branches: list[BranchOutcome] = Field(min_length=1)

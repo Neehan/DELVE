@@ -80,12 +80,12 @@ class BaseCritic(nn.Module, ABC):
     def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Convert each input into a vector, apply the MLP, and predict final answer correctness.
 
-        N counts both versions of the inputs. Frozen mode uses saved vectors; LoRA computes Qwen's last non-padding token vector with gradients. Neither path generates text.
+        N counts input prefixes. Frozen mode uses saved vectors; LoRA computes Qwen's last non-padding token vector with gradients. Neither path generates text.
 
         Args:
             inputs: Cached hidden_state [N, input_size], or LoRA input_ids and attention_mask [N, L]. Tokens are right-padded; mask entries are 1 for real tokens and 0 for padding.
             oracle: Solver-sketch flags [N], not flags for critic-only references.
-            remaining_blocks: Budget left after each history [N]. Paired reference inputs share the same budget.
+            remaining_blocks: Budget left after each history [N]. The prompt also contains this budget.
 
         Returns:
             Tensor: Float32 success logits [N]; sigmoid gives probabilities.
@@ -104,7 +104,7 @@ class BaseCritic(nn.Module, ABC):
         """Map MLP outputs to final-success logits; each critic variant implements this.
 
         Args:
-            hidden: MLP outputs [N, settings.hidden_size], including both reference versions.
+            hidden: MLP outputs [N, settings.hidden_size], one per input prefix.
             oracle: Solver-sketch flags [N]; DE uses these to select execution-only predictions.
             remaining_blocks: Future budget [N], from 1 through settings.horizon - 1.
 
@@ -114,13 +114,13 @@ class BaseCritic(nn.Module, ABC):
         raise NotImplementedError
 
     def loss(self, logits: Tensor, labels: Tensor, oracle: Tensor) -> Tensor:
-        """Measure prediction error against the trajectory's final correct/incorrect answer.
+        """Measure prediction error against the fraction of successful continuations.
 
-        This computes binary cross-entropy for each supplied prediction. It does not average examples or pair reference inputs; BaseTrainer.compute_loss does that.
+        For k successes in n continuations, the target is k/n. BCE with this target equals the mean BCE against all n binary outcomes. BaseTrainer gives each source state equal weight, regardless of its branch count.
 
         Args:
             logits: Predicted success logits [N]; sigmoid(logit) is the probability of success.
-            labels: Final answer correctness [N]: 1 for correct, 0 for incorrect.
+            labels: Observed success fractions [N] in [0, 1].
             oracle: Solver-sketch flags [N]. True applies settings.oracle_weight to that loss. A critic-only reference solution does not change this flag.
 
         Returns:
