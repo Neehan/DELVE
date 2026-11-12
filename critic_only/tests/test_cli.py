@@ -97,7 +97,7 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
         "--destination", str(report), "--split", "test", "--cpu"])
     evaluate.main()
     predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
-    assert list(predictions["final_correctness"]) == [row["labels"] for row in training_rows]
+    assert list(predictions["success_fraction"]) == [row["labels"] for row in training_rows]
     assert predictions[0]["privileged_probability"] is not None
     assert predictions[1]["privileged_probability"] is None
 

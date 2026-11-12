@@ -1,6 +1,7 @@
 """Verify exact branch histories, reference selection, fixed splits, and cached input identity."""
 
 import json
+import shutil
 from typing import Any, cast
 
 import pytest
@@ -29,11 +30,13 @@ def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, 
     """Keep shared full histories while tokenized critic inputs exclude all future reasoning and grades."""
     processor = compile_fixture(prepared_inputs)
     rows = list(processor.iter_inputs())
-    assert len(rows) == 10
+    assert len(rows) == 4
     assert all("FINAL FUTURE" not in json.dumps(row["messages"]) for row in rows)
     branches = [row for row in rows if row["fork"] == 1]
-    assert all(row["branch"]["final_correctness"] == row["branch"]["seed"] for row in branches)
-    assert all(row["phase"] == "critique" and row["response_finished"] for row in branches)
+    assert all(len(row["branches"]) == 2 for row in branches)
+    assert all(branch["final_correctness"] == branch["seed"] for row in branches for branch in row["branches"])
+    assert all(row["phase"] == ("solve" if row["oracle"] else "revise") and not row["response_finished"] for row in branches)
+    assert all(row["remaining_blocks"] == prepared_inputs.horizon - 1 for row in rows)
     assert all(row["split"] == "test" for row in rows if "/2026/" in row["problem_key"])
     assert any("FINAL FUTURE" in text for text in processor.dataset["conversation"])
     destination = prepared_inputs.destination
@@ -44,11 +47,11 @@ def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, 
     shards = storage.save_inputs(encoded, tokenizer, encoding_settings)
     test_paths = [str(destination / name) for name in shards if name.startswith("test/")]
     cached = Dataset.from_parquet(cast(Any, test_paths))
-    assert len(cached) == 5
+    assert len(cached) == 2
     for row in cached.to_list():
         assert row["input_hash"] == token_digest(row["input_ids"])
         assert row["privileged_input_hash"] == token_digest(row["privileged_input_ids"])
-        assert row["labels"] in (0, 1)
+        assert row["labels"] == 0.5
     with pytest.raises(FileExistsError):
         storage.save_inputs(encoded, tokenizer, encoding_settings)
 
@@ -127,14 +130,16 @@ def test_reference_and_history_are_frozen(prepared_inputs: CollectionFixture, to
     encoding_settings["critic_prompt"] = "Saved critic instructions. " + encoding_settings["critic_prompt"]
     encoding_settings["reference_prompt"] = "Saved reference instructions. " + encoding_settings["reference_prompt"]
     encoded = encoder.encode(row, encoding_settings)
-    assert encoded["labels"] == row["branch"]["final_correctness"]
+    assert encoded["labels"] == 0.5
+    assert encoded["branches"] == row["branches"]
     assert all(messages[0]["role"] == "system" for messages in captured)
     assert all(messages[0]["content"].startswith("Saved critic instructions.") for messages in captured)
     assert "Saved reference instructions." in captured[1][0]["content"]
     assert "Saved reference instructions." not in captured[0][0]["content"]
     assert captured[0][1] == captured[1][1]
     assert "Use symmetry." in captured[0][1]["content"]
-    assert "Observed continue-oracle" in captured[0][1]["content"]
+    assert "Observed" not in captured[0][1]["content"]
+    assert "Thinking" in captured[0][1]["content"]
     assert "The answer is one." not in captured[0][0]["content"]
     assert "The answer is one." in captured[1][0]["content"]
     assert "not available to the solver" in captured[1][0]["content"]
@@ -170,10 +175,69 @@ def test_training_subsets_keep_problem_groups() -> None:
         select_training_problems(data, 0)
 
 
-@pytest.mark.parametrize("experiment,fork,expected", [("continue", 1, 1), ("continue-oracle", 3, 3),
-    ("continue", 4, None), ("unaided", None, 0), ("oracle-execution", 0, 0), ("oracle-execution", 1, None)])
+@pytest.mark.parametrize("experiment,fork,expected", [("continue", 1, 1), ("continue-oracle", 3, None),
+    ("continue", 4, None), ("unaided", None, None), ("oracle-execution", 0, None), ("oracle-execution", 1, None)])
 def test_nonterminal_input_selection(experiment: str, fork: int | None, expected: int | None) -> None:
-    """Keep one observed block after each fork, excluding terminal and delayed root-oracle examples."""
+    """Only continuations from the 1× source state supervise the grouped critic."""
     metadata = {"experiment": experiment, "continue_at": fork, "inject_sketch_at": fork, "compute_multiplier_k": 5}
     assert select_input_fork(metadata, 5) == expected
     assert select_input_fork(metadata, 3) is None
+
+
+@pytest.mark.parametrize("branch_count", [8, 16])
+def test_grouped_targets_use_all_seeds(prepared_inputs: CollectionFixture, branch_count: int) -> None:
+    """Adding child seeds changes the denominator, without multiplying inputs or exposing their text."""
+    for source in list(prepared_inputs.outputs_directory.rglob("branch_0")):
+        for seed in range(2, branch_count):
+            child = source.parent / f"branch_{seed}"
+            shutil.copytree(source, child)
+            metadata = json.loads((child / "meta.json").read_text())
+            metadata["seed"] = seed
+            (child / "meta.json").write_text(json.dumps(metadata))
+    rows = list(compile_fixture(prepared_inputs).iter_inputs())
+    assert len(rows) == 4
+    for row in rows:
+        assert len(row["branches"]) == branch_count
+        assert [branch["seed"] for branch in row["branches"]] == list(range(branch_count))
+        assert sum(branch["final_correctness"] for branch in row["branches"]) / branch_count == 1 / branch_count
+        assert len(row["messages"]) == (3 if row["oracle"] else 2)
+        assert "Observed" not in json.dumps(row["messages"])
+
+
+def test_duplicate_child_seed_rejected(prepared_inputs: CollectionFixture) -> None:
+    """Two saved paths for the same sampling seed must not count as independent outcomes."""
+    source = next(prepared_inputs.outputs_directory.rglob("branch_0"))
+    shutil.copytree(source, source.parent / "duplicated_branch")
+    with pytest.raises(ValueError, match="duplicate saved trajectory"):
+        list(compile_fixture(prepared_inputs).iter_inputs())
+
+
+def test_different_source_seeds_stay_separate(prepared_inputs: CollectionFixture) -> None:
+    """Identical-looking histories from different source runs retain separate branch groups."""
+    for directory in list(prepared_inputs.outputs_directory.rglob("seed_0")):
+        duplicate = directory.with_name("seed_1")
+        shutil.copytree(directory, duplicate)
+        for path in duplicate.rglob("meta.json"):
+            metadata = json.loads(path.read_text())
+            if metadata["experiment"] == "unaided":
+                metadata["seed"] = 1
+            else:
+                metadata["source_seed"] = 1
+            path.write_text(json.dumps(metadata))
+    rows = list(compile_fixture(prepared_inputs).iter_inputs())
+    assert len(rows) == len({row["prefix_id"] for row in rows}) == 8
+    assert all(len(row["branches"]) == 2 for row in rows)
+
+
+def test_future_outcomes_do_not_change_input_tokens(prepared_inputs: CollectionFixture,
+    tokenizer: PreTrainedTokenizerFast, encoding_settings: dict[str, Any]) -> None:
+    """Changing branch labels changes supervision only, not either critic input or its identity."""
+    processor = compile_fixture(prepared_inputs)
+    row = next(processor.iter_inputs())
+    formatter = PrefixTokenizer(tokenizer)
+    before = formatter.encode(row, encoding_settings)
+    row["branches"][0]["final_correctness"] = 1
+    after = formatter.encode(row, encoding_settings)
+    assert before["labels"] == 0.5 and after["labels"] == 1
+    for key in ("prefix_id", "input_ids", "privileged_input_ids", "input_hash", "privileged_input_hash"):
+        assert before[key] == after[key]

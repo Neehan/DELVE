@@ -1,7 +1,4 @@
-"""Build a critic input and final correctness label from each saved solver branch.
-
-For example, a branch starting at 2x supplies its history through 3x and its final grade at 5x. Oracle inputs include the actual sketch and the following solver response. The matching reference solution is attached separately for tokenization; later reasoning and grades never enter the prompt.
-"""
+"""Group continuations from the same 1× state into one critic input and success-rate target."""
 
 import hashlib
 import json
@@ -14,37 +11,26 @@ from datasets import Dataset, concatenate_datasets
 
 from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CONTINUATION_EXPERIMENTS, CONVERSATION_FILENAME,
-    META_FILENAME, ORACLE_EXPERIMENTS, OUTPUT_TOKENS_PER_BLOCK,
+    META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, SOLVE_PHASE,
 )
 from discovery_execution.harness.models import Problem, RunState
-from critic_only.constants import DEFAULT_SEED, HASH_SCALE
+from critic_only.constants import DEFAULT_SEED, HASH_SCALE, INPUT_PREFIX_BLOCKS
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLIT_FILENAME
 from discovery_execution.processing.storage import checkpoint_snapshot, file_digest
 from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfig
 
 
 def select_input_fork(metadata: dict[str, Any], horizon: int) -> int | None:
-    """Find a run's branch point if observing one more block still leaves a future to predict.
+    """Return the 1× fork for continuation runs ending at the requested horizon.
 
-    Args:
-        metadata: Saved run metadata identifying the experiment, total budget, fork, and sketch injection point.
-        horizon: Required final rollout budget in blocks, not the remaining budget after the critic input.
-
-    Returns:
-        int | None: Fork block for an eligible run, or None when its budget/experiment is excluded or no future block remains.
+    metadata identifies the experiment and fork; horizon is the requested final budget. Root runs provide source histories, not labels. Other forks and budgets return None.
     """
-    if metadata["compute_multiplier_k"] != horizon:
+    if metadata["compute_multiplier_k"] != horizon or metadata["experiment"] not in CONTINUATION_EXPERIMENTS:
         return None
-    experiment = metadata["experiment"]
-    if experiment in CONTINUATION_EXPERIMENTS:
-        fork = metadata["continue_at"]
-        if not 1 <= fork < horizon:
-            raise ValueError("continuation fork must precede the destination horizon")
-    elif experiment == "unaided" or (experiment == "oracle-execution" and metadata["inject_sketch_at"] == 0):
-        fork = 0
-    else:
-        return None
-    return fork if fork + 1 < horizon else None
+    fork = metadata["continue_at"]
+    if not 1 <= fork < horizon:
+        raise ValueError("continuation fork must precede the destination horizon")
+    return fork if fork == INPUT_PREFIX_BLOCKS else None
 
 
 def selection_fraction(key: str, seed: int) -> float:
@@ -100,9 +86,9 @@ def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
 
 
 class CriticInputProcessor:
-    """Select the visible history and final label for each critic example.
+    """Yield one pre-continuation input per source state and oracle condition.
 
-    iter_inputs yields one record per branch. Helpers reconstruct the checkpoint, verify the original source history and sketch, and select its matching reference solution. Each branch keeps its own history and final label.
+    iter_inputs verifies common histories, hints, sampling settings, and final audits. Each input carries the independent branch outcomes used to estimate its success probability.
     """
 
     def __init__(self, config: PreparationConfig) -> None:
@@ -133,11 +119,7 @@ class CriticInputProcessor:
         self.problems: dict[str, Problem] = {}
 
     def iter_inputs(self) -> Iterator[dict[str, Any]]:
-        """Yield each eligible branch's partial history, matching reference, and final label.
-
-        Returns:
-            Iterator[dict[str, Any]]: Serialized InputPrefix records, one per eligible observed branch, each with its own final binary label.
-        """
+        """Yield serialized InputPrefix records grouped by source and condition, without exposing child reasoning or grades."""
         groups: dict[tuple[Any, ...], list[tuple[Path, dict[str, Any]]]] = defaultdict(list)
         identities = set()
         for name, text in zip(self.dataset["trajectory_id"], self.dataset["metadata"]):
@@ -145,19 +127,15 @@ class CriticInputProcessor:
             fork = select_input_fork(metadata, self.config.horizon)
             if fork is None:
                 continue
-            problem_key = tuple(metadata[key] for key in ("competition", "year", "problem_id"))
-            source_key = (metadata["source_arm"], metadata["source_seed"], fork) if fork else ()
+            problem_key = tuple(metadata[key] for key in ("competition", "year", "problem_id", "model"))
+            source_key = (metadata["source_arm"], metadata["source_seed"], fork)
             identity = (*problem_key, *source_key, metadata["experiment"], metadata["seed"])
             if identity in identities:
                 raise ValueError(f"duplicate saved trajectory: {name}")
             identities.add(identity)
-            if fork == 0:
-                solution_index = metadata["solution_index"] if metadata["experiment"] in ORACLE_EXPERIMENTS else None
-                yield self._build_input(Path(name), metadata, solution_index).model_dump()
-            else:
-                groups[problem_key + source_key].append((Path(name), metadata))
-        for group in groups.values():
-            for record in self._build_branch_inputs(group):
+            groups[problem_key + source_key].append((Path(name), metadata))
+        for key in sorted(groups):
+            for record in self._build_branch_inputs(groups[key]):
                 yield record.model_dump()
 
     def _read_json(self, path: Path) -> Any:
@@ -189,13 +167,9 @@ class CriticInputProcessor:
         return self.problems[key]
 
     def _build_branch_inputs(self, group: list[tuple[Path, dict[str, Any]]]) -> list[InputPrefix]:
-        """Build inputs from related branches after checking their shared source and sketch selection.
+        """Reconstruct one source state and build its unaided and oracle examples.
 
-        Args:
-            group: Continuation paths and metadata sharing the same problem, source run, source seed, and fork block.
-
-        Returns:
-            list[InputPrefix]: One observed-history record per branch, using the group's matching solution selection.
+        group contains paths and metadata with the same problem, source arm, source seed, and fork. Returns one InputPrefix per available condition. Oracle branches must agree on the sketch; its matching solution also supplies the unaided reference view.
         """
         _, metadata = group[0]
         root = Path(metadata["competition"]) / str(metadata["year"]) / metadata["model"]
@@ -206,57 +180,54 @@ class CriticInputProcessor:
                 raise ValueError(f"source identity mismatch: {source}")
         if parent["experiment"] != "unaided" or parent["seed"] != metadata["source_seed"]:
             raise ValueError(f"source is not the selected unaided seed: {source}")
-        snapshot, _ = self._read_checkpoint(source, metadata["continue_at"], False)
+        snapshot, request = self._read_checkpoint(source, INPUT_PREFIX_BLOCKS, False)
         problem = self._load_problem(metadata)
+        if problem.statement not in snapshot["messages"][0]["content"]:
+            raise ValueError(f"current problem statement differs from saved solver input: {source}")
         oracle_indices = {item["solution_index"] for _, item in group if item["experiment"] == "continue-oracle"}
         if len(oracle_indices) > 1:
             raise ValueError("oracle branches from one prefix must use the same sketch")
         solution_index = problem.select_solution_index(metadata["source_seed"], next(iter(oracle_indices), None))
         records = []
+        for experiment in CONTINUATION_EXPERIMENTS:
+            branches = sorted((item for item in group if item[1]["experiment"] == experiment), key=lambda item: item[1]["seed"])
+            if not branches:
+                continue
+            outcomes, intervention = self._read_matching_branches(branches, parent, snapshot["messages"], problem.solutions[solution_index].sketch)
+            oracle = experiment == "continue-oracle"
+            messages = snapshot["messages"] + ([intervention] if intervention is not None else [])
+            records.append(InputPrefix(
+                prefix_id=f"{source}/checkpoint_{INPUT_PREFIX_BLOCKS}x/{experiment}", oracle=oracle,
+                problem_key=f"{problem.competition}/{problem.year}/{problem.problem_id}", fork=INPUT_PREFIX_BLOCKS,
+                remaining_blocks=self.config.horizon - INPUT_PREFIX_BLOCKS,
+                split=self.dataset.select_columns(["split"])[self.indices[str(source)]]["split"], messages=messages,
+                phase=SOLVE_PHASE if oracle else request["phase"],
+                response_finished=False if oracle else request["finish_reason"] == "stop",
+                solution_index=solution_index, reference_solution=problem.solutions[solution_index].solution, branches=outcomes))
+        return records
+
+    def _read_matching_branches(self, branches: list[tuple[Path, dict[str, Any]]], parent: dict[str, Any],
+                                source_messages: list[dict[str, str]], sketch: str) -> tuple[list[BranchOutcome], dict[str, str] | None]:
+        """Verify each child's source and intervention, returning outcomes and the exact injected message.
+
+        branches supplies child paths and metadata; parent supplies sampling settings. source_messages and sketch define the expected input. Returns final outcomes and the shared hint message, if present. Child text is used only for validation.
+        """
+        outcomes = []
         intervention = None
-        for path, branch_metadata in group:
+        for path, metadata in branches:
             for name in ("temperature", "top_p", "top_k"):
-                if branch_metadata["backend"][name] != parent["backend"][name]:
+                if metadata["backend"][name] != parent["backend"][name]:
                     raise ValueError(f"branch sampling differs from source: {path}")
-            record = self._build_input(path, branch_metadata, solution_index)
-            self._validate_source_history(record.messages, snapshot["messages"], path)
-            if record.oracle:
-                candidate = self._validate_oracle_injection(record.messages, snapshot["messages"], problem.solutions[solution_index].sketch, path)
+            oracle = metadata["experiment"] == "continue-oracle"
+            snapshot, _ = self._read_checkpoint(path, INPUT_PREFIX_BLOCKS + 1, oracle)
+            self._validate_source_history(snapshot["messages"], source_messages, path)
+            if oracle:
+                candidate = self._validate_oracle_injection(snapshot["messages"], source_messages, sketch, path)
                 if intervention is not None and intervention != candidate:
                     raise ValueError(f"oracle branches have different injection messages: {path}")
                 intervention = candidate
-            records.append(record)
-        return records
-
-    def _build_input(self, path: Path, metadata: dict[str, Any], solution_index: int | None) -> InputPrefix:
-        """Pair the history one block after the fork with that branch's final answer grade.
-
-        Args:
-            path: Saved trajectory ID relative to the original outputs root.
-            metadata: Run metadata identifying its fork, oracle condition, seed, and final budget.
-            solution_index: Explicit matching solution index, or None to apply the problem's seed-based round robin.
-
-        Returns:
-            InputPrefix: History through one block after the fork, matching reference, remaining budget, split, and final label.
-        """
-        fork = metadata["continue_at"] if metadata["experiment"] in CONTINUATION_EXPERIMENTS else 0
-        oracle = metadata["experiment"] in ORACLE_EXPERIMENTS
-        outcome = self._read_branch_outcome(path, metadata, fork)
-        snapshot, request = self._read_checkpoint(path, fork + 1, oracle)
-        problem = self._load_problem(metadata)
-        if problem.statement not in snapshot["messages"][0]["content"]:
-            raise ValueError(f"current problem statement differs from saved solver input: {path}")
-        solution_index = problem.select_solution_index(metadata["seed"], solution_index)
-        solution = problem.solutions[solution_index]
-        if oracle and not fork:
-            if not any(message["role"] == "user" and solution.sketch in message["content"] for message in snapshot["messages"]):
-                raise ValueError(f"current sketch differs from saved intervention: {path}")
-        key = f"{problem.competition}/{problem.year}/{problem.problem_id}"
-        return InputPrefix(prefix_id=f"{outcome.path}/checkpoint_{fork + 1}x", oracle=oracle, problem_key=key,
-                           fork=fork, remaining_blocks=self.config.horizon - fork - 1,
-                           split=self.dataset.select_columns(["split"])[self.indices[str(path)]]["split"], messages=snapshot["messages"],
-                           phase=request["phase"], response_finished=request["finish_reason"] == "stop",
-                           solution_index=solution_index, reference_solution=solution.solution, branch=outcome)
+            outcomes.append(self._read_branch_outcome(path, metadata, INPUT_PREFIX_BLOCKS))
+        return outcomes, intervention
 
     def _validate_source_history(self, messages: list[dict[str, str]], prefix: list[dict[str, str]], path: Path) -> None:
         """Reject a branch that changes the history it was supposed to continue.

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
-from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH
+from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.critic_input_processor import CriticInputProcessor
 from critic_only.data.tokenizer import PrefixTokenizer
@@ -101,12 +101,13 @@ def tokenization_settings(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("maximum input length exceeds the model context limit")
     return {"model": model, "revision": revision, "hidden_size": config.hidden_size,
             "horizon": args.horizon, "max_length": args.max_length,
+            "target": CRITIC_TARGET, "prefix_blocks": INPUT_PREFIX_BLOCKS,
             "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
 
 def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
-    """Select branch histories, tokenize both reference versions, and save them locally.
+    """Group continuations at 1×, tokenize both reference versions, and save them locally.
 
     Args:
         directory: Completed shared trajectory collection.
@@ -122,6 +123,8 @@ def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
         examples = Dataset.from_generator(processor.iter_inputs, cache_dir=temporary)
         if not len(examples):
             raise ValueError("no eligible nonterminal critic inputs")
+        branch_counts = [len(branches) for branches in examples["branches"]]
+        print(f"Prepared {len(examples)} shared states; continuations per state: {min(branch_counts)}–{max(branch_counts)}", flush=True)
         encoded = examples.map(formatter.encode, fn_kwargs={"settings": settings},
                                remove_columns=examples.column_names, load_from_cache_file=False)
         CriticInputStorage(directory).save_inputs(encoded, tokenizer, settings)

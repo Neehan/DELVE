@@ -273,3 +273,23 @@ def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int]
     restored.eval()
     actual = restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("successes,trials", [(0, 8), (3, 8), (7, 16), (16, 16)])
+def test_grouped_loss_matches_individual_outcomes(successes: int, trials: int,
+    critic_settings: Callable[[str], CriticConfig]) -> None:
+    """Fraction-target BCE and its gradient equal the mean across independent binary outcomes."""
+    model = PPOCritic(critic_settings("ppo-critic"))
+    logits = torch.tensor([0.7], requires_grad=True)
+    label = torch.tensor([successes / trials])
+    grouped = model.loss(logits, label, torch.tensor([False])).mean()
+    outcomes = torch.tensor([1.] * successes + [0.] * (trials - successes))
+    individual = torch.nn.functional.binary_cross_entropy_with_logits(logits.expand(trials), outcomes)
+    torch.testing.assert_close(grouped, individual)
+    torch.testing.assert_close(torch.autograd.grad(grouped, logits)[0], torch.autograd.grad(individual, logits)[0])
+    nll, brier = outcome_scores(logits.detach().numpy(), label.numpy())
+    individual_nll, individual_brier = outcome_scores(np.full(trials, 0.7), outcomes.numpy())
+    np.testing.assert_allclose(nll, individual_nll.mean(), rtol=1e-6)
+    np.testing.assert_allclose(brier, individual_brier.mean(), rtol=1e-6)
+    report = evaluation_report(logits.detach().numpy(), label.numpy(), ["problem"])
+    assert report["value_mse"] == pytest.approx((torch.sigmoid(logits).item() - successes / trials) ** 2)

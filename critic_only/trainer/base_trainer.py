@@ -1,4 +1,4 @@
-"""Train critics on the same trajectory with and without a reference solution, averaging the two losses."""
+"""Train critics on the same prefix with and without a reference solution, averaging the two losses."""
 
 import json
 from pathlib import Path
@@ -37,7 +37,7 @@ class BaseTrainer(Trainer):
             raise ValueError(
                 "compact critic checkpoints support Trainer single-device/DDP only"
             )
-        # Request the total label count so uneven microbatches retain equal per-trajectory weight.
+        # Request the total label count so uneven microbatches retain equal per-prefix weight.
         self.model_accepts_loss_kwargs = True
         self.args.disable_tqdm = True
         self.remove_callback(PrinterCallback)
@@ -66,15 +66,15 @@ class BaseTrainer(Trainer):
     def compute_loss(
         self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any
     ) -> Any:
-        """Average each trajectory's losses with and without its reference solution.
+        """Average each prefix's losses with and without its reference solution.
 
-        Both predictions use the same final correctness label. With a reference, trajectory_loss = (loss_without_reference + loss_with_reference) / 2. Without one, trajectory_loss = loss_without_reference. Normalize over trajectories in the entire optimizer update, including accumulated microbatches.
+        Both predictions use the same success-fraction target. With a reference, prefix_loss = (loss_without_reference + loss_with_reference) / 2. Without one, prefix_loss = loss_without_reference. Normalize over prefixes in the entire optimizer update, including accumulated microbatches.
 
         Args:
             model: Critic, possibly wrapped for distributed training; run it once for both input versions.
-            inputs: B labels and the batched model inputs. The first B inputs omit references; the remaining P include them. privileged_indices [P] identifies which of the B trajectories those extra inputs belong to. oracle identifies solver-visible sketches, not critic-only references.
+            inputs: B labels and the batched model inputs. The first B inputs omit references; the remaining P include them. privileged_indices [P] identifies which of the B prefixes those extra inputs belong to. oracle identifies solver-visible sketches, not critic-only references.
             *args: Hugging Face may pass return_outputs as the first positional argument.
-            **kwargs: return_outputs requests evaluation predictions. num_items_in_batch counts trajectories across the accumulated batches, and across ranks when configured.
+            **kwargs: return_outputs requests evaluation predictions. num_items_in_batch counts prefixes across the accumulated batches, and across ranks when configured.
 
         Returns:
             Tensor: Mean training loss, or (loss, predictions) for evaluation. Predictions keep the two input versions separate.
@@ -92,7 +92,7 @@ class BaseTrainer(Trainer):
         oracle = inputs["oracle"][: len(labels)]
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
         loss_without_reference = critic.loss(logits_without_reference, labels, oracle)
-        trajectory_losses = loss_without_reference
+        prefix_losses = loss_without_reference
         if reference_indices.numel():
             loss_with_reference = critic.loss(
                 logits_with_reference,
@@ -102,17 +102,17 @@ class BaseTrainer(Trainer):
             paired_losses = 0.5 * (
                 loss_without_reference[reference_indices] + loss_with_reference
             )
-            # Replace only trajectories that have a reference; unpaired ones keep their original loss.
-            trajectory_losses = trajectory_losses.index_copy(
+            # Replace only prefixes that have a reference; unpaired ones keep their original loss.
+            prefix_losses = prefix_losses.index_copy(
                 0, reference_indices, paired_losses
             )
-        trajectory_count = kwargs.get("num_items_in_batch")
+        prefix_count = kwargs.get("num_items_in_batch")
         loss = (
-            trajectory_losses.mean() if trajectory_count is None
-            else trajectory_losses.sum() / trajectory_count
+            prefix_losses.mean() if prefix_count is None
+            else prefix_losses.sum() / prefix_count
         )
-        if trajectory_count is not None and self.args.average_tokens_across_devices:
-            # DDP averages rank gradients; undo that average when dividing by the global trajectory count.
+        if prefix_count is not None and self.args.average_tokens_across_devices:
+            # DDP averages rank gradients; undo that average when dividing by the global prefix count.
             loss = loss * self.accelerator.num_processes
         return_outputs = args[0] if args else kwargs.get("return_outputs", False)
         if return_outputs:
@@ -127,12 +127,12 @@ class BaseTrainer(Trainer):
         logits_with_reference: torch.Tensor,
         reference_indices: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Line up the two predictions per trajectory so evaluation can score them separately.
+        """Line up the two predictions per prefix so evaluation can score them separately.
 
         Args:
-            logits_without_reference: Predictions [B], one for every trajectory.
-            logits_with_reference: Predictions [P], only for trajectories with references.
-            reference_indices: Positions [P] of those trajectories in the full batch.
+            logits_without_reference: Predictions [B], one for every prefix.
+            logits_with_reference: Predictions [P], only for prefixes with references.
+            reference_indices: Positions [P] of those prefixes in the full batch.
 
         Returns:
             dict[str, Tensor]: Two logit arrays [B] and a reference-availability mask. Missing reference predictions are zero placeholders ignored by metrics.

@@ -114,13 +114,13 @@ class BaseCritic(nn.Module, ABC):
         raise NotImplementedError
 
     def loss(self, logits: Tensor, labels: Tensor, oracle: Tensor) -> Tensor:
-        """Measure prediction error against the trajectory's final correct/incorrect answer.
+        """Measure prediction error against the fraction of successful continuations.
 
-        This computes binary cross-entropy for each supplied prediction. It does not average examples or pair reference inputs; BaseTrainer.compute_loss does that.
+        For k successes in n continuations, the target is k/n. BCE with this target equals the mean BCE against all n binary outcomes. BaseTrainer averages reference views and then gives each source state equal weight, regardless of its branch count.
 
         Args:
             logits: Predicted success logits [N]; sigmoid(logit) is the probability of success.
-            labels: Final answer correctness [N]: 1 for correct, 0 for incorrect.
+            labels: Observed success fractions [N] in [0, 1].
             oracle: Solver-sketch flags [N]. True applies settings.oracle_weight to that loss. A critic-only reference solution does not change this flag.
 
         Returns:

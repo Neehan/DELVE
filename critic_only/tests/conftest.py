@@ -139,10 +139,13 @@ def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": 0},
+             "oracle": False, "remaining_blocks": 2, "labels": 0.5,
+             "branches": [{"seed": 0, "final_correctness": 0, "path": "branch0"},
+                          {"seed": 1, "final_correctness": 1, "path": "branch1"}]},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "remaining_blocks": 1, "labels": 1}]
+             "oracle": False, "remaining_blocks": 1, "labels": 1.,
+             "branches": [{"seed": 0, "final_correctness": 1, "path": "branch0"}]}]
 
 
 @pytest.fixture
@@ -150,5 +153,5 @@ def training_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Use fixed vectors with one missing reference to exercise paired loss weighting."""
     return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
              "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
-             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"]}
+             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branches": row["branches"]}
             for index, row in enumerate(token_rows)]

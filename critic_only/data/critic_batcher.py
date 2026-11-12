@@ -1,4 +1,4 @@
-"""Put each trajectory's inputs with and without a reference solution into one model batch."""
+"""Put each prefix's inputs with and without a reference solution into one model batch."""
 
 from typing import Any
 
@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizerBase
 class CriticBatcher:
     """Batch tokens for LoRA or cached vectors for frozen training.
 
-    The first B inputs omit reference solutions. The next P include available references. privileged_indices maps those P extra inputs back to their original trajectories; for example, [0, 2] means only trajectories 0 and 2 have references. Both versions use the same final correctness label.
+    The first B inputs omit reference solutions. The next P include available references. privileged_indices maps those P extra inputs back to their original prefixes; for example, [0, 2] means only prefixes 0 and 2 have references. Both versions use the same success-fraction target.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase | None) -> None:
@@ -26,7 +26,7 @@ class CriticBatcher:
         self.tokenizer = tokenizer
 
     def __call__(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """Put both reference versions into one batch while keeping one label per trajectory.
+        """Put both reference versions into one batch while keeping one label per prefix.
 
         Args:
             rows: Examples with tokens or vectors, optional reference inputs, labels, oracle flags, and remaining budgets.

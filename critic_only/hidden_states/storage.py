@@ -120,7 +120,7 @@ class HiddenStateStorage:
         table = pq.read_table(path)
         if (table.schema.metadata or {}).get(b"signature") != signature.encode() or table.num_rows != len(inputs):
             raise ValueError(f"feature shard configuration differs: {path}")
-        metadata = ["prefix_id", "problem_key", "input_hash", "privileged_input_hash", "labels", "oracle", "remaining_blocks"]
+        metadata = ["prefix_id", "problem_key", "input_hash", "privileged_input_hash", "labels", "oracle", "remaining_blocks", "branches"]
         for row, source in zip(table.to_pylist(), inputs.select_columns(metadata).to_list()):
             for key in metadata:
                 if row[key] != source[key]:

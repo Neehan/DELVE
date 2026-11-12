@@ -34,7 +34,7 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     """Save per-trajectory probabilities and aggregate scores for both reference versions.
 
     Args:
-        result: Trainer predictions: ordinary logits, privileged logits, availability mask, and binary labels.
+        result: Trainer predictions: ordinary logits, privileged logits, availability mask, and success fractions.
         dataset: Evaluated examples in prediction order, including IDs, problem keys, and remaining budgets.
         args: CLI settings naming the checkpoint, evaluated split, and report destination.
 
@@ -57,7 +57,7 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     Dataset.from_dict({"prefix_id": dataset["prefix_id"], "problem_key": keys,
                        "remaining_blocks": dataset["remaining_blocks"],
                        "probability": expit(logits).tolist(), "privileged_probability": privileged,
-                       "final_correctness": labels.tolist()}).to_parquet(str(args.destination / "predictions.parquet"))
+                       "success_fraction": labels.tolist(), "branches": dataset["branches"]}).to_parquet(str(args.destination / "predictions.parquet"))
 
 
 def main() -> None:
