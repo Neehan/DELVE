@@ -7,6 +7,7 @@ from typing import Any
 
 from datasets import DatasetDict
 
+from critic_only.constants import CRITIC_INPUT_VIEW
 from critic_only.data.storage import CriticInputStorage
 from critic_only.hidden_states.storage import HiddenStateStorage
 
@@ -33,7 +34,7 @@ def load_critic_splits(directory: Path, splits: tuple[str, ...], training_mode: 
 
 
 def input_signature(manifest: dict[str, Any], training_mode: str) -> str:
-    """Hash the selected cache metadata so a resumed run can detect changed inputs.
+    """Hash the cache and selected input view so resume cannot mix training objectives.
 
     Args:
         manifest: Processed model metadata with a completed token or hidden-state section.
@@ -43,4 +44,4 @@ def input_signature(manifest: dict[str, Any], training_mode: str) -> str:
         str: Hash of the selected input section. Adding an optional hidden-state cache does not change a LoRA run's identity.
     """
     section = manifest["features" if training_mode == "frozen" else "tokenization"]
-    return hashlib.sha256(json.dumps(section, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps({"cache": section, "input_view": CRITIC_INPUT_VIEW}, sort_keys=True).encode()).hexdigest()

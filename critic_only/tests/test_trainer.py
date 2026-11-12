@@ -52,11 +52,11 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
 
 @pytest.mark.parametrize("mode", ["frozen", "lora"])
 def test_training_resume(mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                         training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+                         training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
     settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
-    training_rows = token_rows if mode == "lora" else training_rows
+    training_rows = reference_token_rows if mode == "lora" else training_rows
     full = make_trainer(tmp_path / "full", settings, tokenizer, training_rows, [])
     full.train()
     interrupted = make_trainer(tmp_path / "resumed", settings, tokenizer, training_rows, [InterruptTraining()])
@@ -94,21 +94,17 @@ def test_metrics_persist_before_checkpoint(critic_settings: Callable[[str], Crit
 
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
-@pytest.mark.parametrize("references", [(False, False), (True, True), (False, True)])
 @pytest.mark.parametrize("mode", ["frozen", "lora"])
-def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool], mode: str,
+def test_reference_loss_and_gradients(variant: str, mode: str,
                                  critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                                 training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]],
+                                 training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]],
                                  tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Match independent per-example losses and gradients, including rows with missing references."""
+    """Match independent reference-only losses and gradients for every critic and training mode."""
     settings = critic_settings(variant).model_copy(update={"training_mode": mode,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     column = "input_ids" if mode == "lora" else "hidden_state"
-    reference = [2, 3, 2, 3] if mode == "lora" else [0.25] * 16
-    source = token_rows if mode == "lora" else training_rows
-    rows = [{**row, "oracle": variant != "ppo-critic" and index == 1,
-             f"privileged_{column}": reference if present else None}
-            for index, (row, present) in enumerate(zip(source, references))]
+    source = reference_token_rows if mode == "lora" else training_rows
+    rows = [{**row, "oracle": variant != "ppo-critic" and index == 1} for index, row in enumerate(source)]
     trainer = make_trainer(tmp_path / "run", settings, tokenizer, rows, [])
     model = cast(BaseCritic, trainer.model)
     model.eval()
@@ -122,31 +118,31 @@ def test_paired_loss_and_gradients(variant: str, references: tuple[bool, bool], 
     expected_losses = []
     for row in rows:
         labels = torch.tensor([row["labels"]], dtype=torch.float32)
-        views = [row[column]]
-        if row[f"privileged_{column}"] is not None:
-            views.append(row[f"privileged_{column}"])
-        losses = []
-        for tokens in views:
-            inputs = batcher([{**row, column: tokens, f"privileged_{column}": None}])["inputs"]
-            prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
-                               remaining_blocks=torch.tensor([row["remaining_blocks"]]))
-            losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
-        expected_losses.append(torch.stack(losses).mean())
+        selected = row[f"privileged_{column}"]
+        if mode == "lora":
+            tokens = torch.tensor([selected])
+            inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens)}
+        else:
+            inputs = {"hidden_state": torch.tensor([selected])}
+        prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
+                           remaining_blocks=torch.tensor([row["remaining_blocks"]]))
+        expected_losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
     expected = torch.stack(expected_losses).mean()
     torch.testing.assert_close(actual, expected)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     for actual_gradient, expected_gradient in zip(torch.autograd.grad(actual, parameters), torch.autograd.grad(expected, parameters)):
         torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-6, rtol=1e-4)
-    assert outputs["privileged_available"].tolist() == list(references)
+    assert set(outputs) == {"logits"}
+    assert outputs["logits"].shape == (len(rows),)
 
 
 @pytest.mark.parametrize("mode", ["frozen", "lora"])
 def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
-    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+    tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Uneven microbatches must give each trajectory equal weight in an optimizer update."""
     settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
-    rows = token_rows if mode == "lora" else training_rows
+    rows = reference_token_rows if mode == "lora" else training_rows
     dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": 1, "oracle": True}])
     updates = []
     for batch_size, accumulation in ((3, 1), (2, 2), (1, 3)):
@@ -165,3 +161,22 @@ def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[s
     for accumulated in updates[1:]:
         for name, expected in updates[0].items():
             torch.testing.assert_close(accumulated[name], expected, atol=1e-6, rtol=1e-5, msg=name)
+
+
+@pytest.mark.parametrize("mode", ["frozen", "lora"])
+def test_batcher_uses_only_references(mode: str, tokenizer: PreTrainedTokenizerFast,
+    reference_token_rows: list[dict[str, Any]], training_rows: list[dict[str, Any]]) -> None:
+    """No-reference inputs can change without affecting model tensors or doubling batch size."""
+    column = "input_ids" if mode == "lora" else "hidden_state"
+    rows = reference_token_rows if mode == "lora" else training_rows
+    batcher = CriticBatcher(tokenizer if mode == "lora" else None)
+    expected = batcher(rows)
+    changed = [{**row, column: None} for row in rows]
+    actual = batcher(changed)
+    assert set(actual) == {"inputs", "labels", "oracle", "remaining_blocks"}
+    for key, tensor in expected["inputs"].items():
+        assert tensor.shape[0] == len(rows)
+        torch.testing.assert_close(actual["inputs"][key], tensor)
+    invalid = [{**rows[0], f"privileged_{column}": None}]
+    with pytest.raises(ValueError, match="reference input for every row"):
+        batcher(invalid)

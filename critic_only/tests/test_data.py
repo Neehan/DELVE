@@ -1,5 +1,6 @@
 """Verify exact branch histories, reference selection, fixed splits, and cached input identity."""
 
+import hashlib
 import json
 import shutil
 from typing import Any, cast
@@ -10,12 +11,22 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
 from critic_only.data.models import PreparationConfig
+from critic_only.data.dataset_loader import input_signature
 from critic_only.data.storage import CriticInputStorage
 from critic_only.data.critic_input_processor import CriticInputProcessor, select_input_fork, select_training_problems
 from critic_only.data.tokenizer import PrefixTokenizer, token_digest
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
 from discovery_execution.processing.problem_splits import ProblemSplits
+
+
+def test_input_signature_separates_reference_only_runs() -> None:
+    """Old paired-view checkpoints must not resume under the reference-only objective."""
+    manifest = {"tokenization": {"model": "fixture", "rows": 4}}
+    paired_signature = hashlib.sha256(json.dumps(manifest["tokenization"], sort_keys=True).encode()).hexdigest()
+    reference_signature = input_signature(manifest, "lora")
+    assert reference_signature != paired_signature
+    assert input_signature({**manifest, "features": {"rows": 4}}, "lora") == reference_signature
 
 
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:

@@ -149,9 +149,15 @@ def token_rows() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def training_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Use fixed vectors with one missing reference to exercise paired loss weighting."""
+def reference_token_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Supply every pilot training row with a reference while retaining both cached views."""
+    return [{**row, "privileged_input_ids": [2, 3, 3, 2], "length": 4} for row in token_rows]
+
+
+@pytest.fixture
+def training_rows(reference_token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use distinct ordinary and reference vectors to verify reference-only training."""
     return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
              "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
              "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branches": row["branches"]}
-            for index, row in enumerate(token_rows)]
+            for index, row in enumerate(reference_token_rows)]

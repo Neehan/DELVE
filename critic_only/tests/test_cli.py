@@ -72,12 +72,12 @@ def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]
 @pytest.mark.parametrize("fraction", [1.0, 0.5])
 @pytest.mark.parametrize("mode", ["frozen", "lora"])
 def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic_settings: Callable[[str], CriticConfig],
-    training_rows: list[dict[str, Any]], token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """All variants train from features only, preserve paired losses, and export final-outcome predictions."""
+    training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """All variants train from features only, use reference-only losses, and export final-outcome predictions."""
     settings = critic_settings(variant).model_copy(update={"training_mode": mode,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     root, output, report = tmp_path / "data", tmp_path / "run", tmp_path / "evaluation"
-    save_features(root, settings, training_rows if mode == "frozen" else token_rows)
+    save_features(root, settings, training_rows if mode == "frozen" else reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
     trainer_factory = Mock(wraps=train.BaseTrainer)
     monkeypatch.setattr(train, "BaseTrainer", trainer_factory)
@@ -98,8 +98,11 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
     evaluate.main()
     predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
     assert list(predictions["success_fraction"]) == [row["labels"] for row in training_rows]
-    assert predictions[0]["privileged_probability"] is not None
-    assert predictions[1]["privileged_probability"] is None
+    assert "probability" in predictions.column_names
+    assert "privileged_probability" not in predictions.column_names
+    metrics = json.loads((report / "metrics.json").read_text())
+    assert metrics["reference_solution"] is True
+    assert "terminal_nll" in metrics and "without_reference" not in metrics
 
 
 @pytest.mark.parametrize("fraction", ["0", "-1", "1.1", "nan"])

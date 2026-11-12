@@ -28,8 +28,6 @@ def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str],
     assert type(model).__name__ == {"ppo-critic": "PPOCritic", "ppo-oracle-critic": "PPOOracleCritic", "de-critic": "DECritic"}[variant]
     batch = CriticBatcher(None)(training_rows)
     labels = batch.pop("labels")
-    batch = {"inputs": {"hidden_state": batch["inputs"]["hidden_state"][:len(labels)]},
-             "oracle": batch["oracle"][:len(labels)], "remaining_blocks": batch["remaining_blocks"][:len(labels)]}
     model.train()
     prediction = model(**batch)
     assert prediction.shape == (len(labels),)
@@ -140,17 +138,13 @@ def test_checkpoint_selection_matches_problem_macro_report() -> None:
     """Unequal prefix counts must not make checkpoint selection prefer the worse problem-level critic."""
     labels = np.ones(4)
     problem_keys = ["problem-A"] * 3 + ["problem-B"]
-    available = np.array([True, False, True, True])
     selected_scores = []
     for probabilities in ([0.9, 0.9, 0.9, 0.1], [0.5, 0.5, 0.5, 0.5]):
         logits = logit(probabilities)
-        metrics = compute_metrics(EvalPrediction(cast(Any, (logits, logits, available)), labels), problem_keys)
+        metrics = compute_metrics(EvalPrediction(logits, labels), problem_keys)
         report = evaluation_report(logits, labels, problem_keys)
         assert metrics["terminal_nll"] == report["terminal_nll"]
         assert metrics["terminal_brier"] == report["terminal_brier"]
-        privileged_report = evaluation_report(logits[available], labels[available],
-                                              [key for key, present in zip(problem_keys, available) if present])
-        assert metrics["privileged_terminal_nll"] == privileged_report["terminal_nll"]
         selected_scores.append(metrics["terminal_nll"])
     assert selected_scores[1] < selected_scores[0]
 
@@ -216,13 +210,13 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
 
 
 def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfig],
-                                  tokenizer: PreTrainedTokenizerFast, token_rows: list[dict[str, Any]]) -> None:
+                                  tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
     """Token inputs train adapters and heads while the pretrained Qwen parameters remain frozen."""
     settings = critic_settings("ppo-critic").model_copy(update={"training_mode": "lora", "lora_rank": 2, "lora_alpha": 4})
     model = create_critic(settings, True)
-    batch = CriticBatcher(tokenizer)(token_rows)
+    batch = CriticBatcher(tokenizer)(reference_token_rows)
     logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
-    labels = torch.cat((batch["labels"], batch["labels"][batch["privileged_indices"]]))
+    labels = batch["labels"]
     model.loss(logits, labels, batch["oracle"]).mean().backward()
     assert model.language_model is not None
     parameters = dict(model.language_model.named_parameters())
@@ -237,7 +231,7 @@ def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfi
                                                        (10, {0, 1, 2}), (None, {0, 1, 2})])
 def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int],
                               critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
-                              token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+                              reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Only selected final layers receive adapters; gradients and checkpoint restoration remain correct."""
     settings = critic_settings("ppo-critic")
     config = Qwen3Config.from_pretrained(settings.model)
@@ -248,7 +242,7 @@ def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int]
     settings = settings.model_copy(update={"model": str(directory), "training_mode": "lora",
                                            "lora_rank": 2, "lora_alpha": 4, "lora_layers": layer_count})
     model = create_critic(settings, True)
-    batch = CriticBatcher(tokenizer)(token_rows)
+    batch = CriticBatcher(tokenizer)(reference_token_rows)
     model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).sum().backward()
     assert model.language_model is not None
     embedding_layer = model.language_model.get_submodule("base_model.model.embed_tokens")

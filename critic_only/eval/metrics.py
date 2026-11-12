@@ -1,6 +1,6 @@
 """Score success probabilities against grouped continuation outcomes, weighting problems equally."""
 
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 from scipy.special import expit
@@ -24,25 +24,17 @@ def outcome_scores(logits: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, 
 
 
 def compute_metrics(prediction: EvalPrediction, problem_keys: list[str]) -> dict[str, float]:
-    """Report validation error separately for inputs with and without reference solutions.
+    """Report reference-conditioned validation metrics, averaging problems equally.
 
     Args:
-        prediction: Trainer outputs containing both sets of logits, reference availability, and final labels.
-        problem_keys: Problem ID for each example, in prediction order.
+        prediction: Trainer outputs containing scalar logits and success-fraction labels.
+        problem_keys: Problem ID for each example in prediction order.
 
     Returns:
-        dict[str, float]: Problem-averaged NLL and Brier scores. terminal_nll, measured without references, selects the best checkpoint.
+        dict[str, float]: NLL, outcome Brier, and value MSE. terminal_nll selects the best checkpoint.
     """
-    logits, privileged_logits, available = cast(tuple[np.ndarray, np.ndarray, np.ndarray], prediction.predictions)
-    labels = np.asarray(prediction.label_ids)
-    report = evaluation_report(np.asarray(logits), labels, problem_keys)
-    metrics = {"terminal_nll": report["terminal_nll"], "terminal_brier": report["terminal_brier"], "value_mse": report["value_mse"]}
-    mask = np.asarray(available, dtype=bool)
-    if mask.any():
-        privileged_keys = [key for key, present in zip(problem_keys, mask) if present]
-        report = evaluation_report(np.asarray(privileged_logits)[mask], labels[mask], privileged_keys)
-        metrics.update(privileged_terminal_nll=report["terminal_nll"], privileged_terminal_brier=report["terminal_brier"], privileged_value_mse=report["value_mse"])
-    return metrics
+    report = evaluation_report(np.asarray(prediction.predictions), np.asarray(prediction.label_ids), problem_keys)
+    return {"terminal_nll": report["terminal_nll"], "terminal_brier": report["terminal_brier"], "value_mse": report["value_mse"]}
 
 
 def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list[str]) -> dict[str, Any]:

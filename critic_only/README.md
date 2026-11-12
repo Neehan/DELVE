@@ -2,7 +2,7 @@
 
 Train a critic to predict final-answer correctness at 5× from a shared 1× solver state. Setup groups `continue-at-1x` and `continue-oracle-at-1x` runs separately. The input is the source history plus the optional saved hint, **before any child continuation**. The target is `successful continuations / total continuations`; all available independent seeds are used, so 8 and 16 branches need no configuration change. Different source seeds are separate inputs, and conflicting hints or sampling settings are rejected.
 
-With one source seed per problem, 1,000 problems give 2,000 inputs across the two conditions. Each has versions with and without the matching critic-only reference solution. Their BCE losses are averaged, then inputs receive equal weight regardless of branch count. This equals averaging binary BCE within each branch group. Parquet rows retain branch seeds, paths, and outcomes for auditing. Evaluation reports mean outcome NLL/Brier and `value_mse` against the observed success fraction.
+With one source seed per problem, 1,000 problems give 2,000 inputs across the two conditions. Both reference and no-reference views remain cached for future experiments; this pilot trains and evaluates only the reference-containing view. Each row contributes one BCE loss, with equal weight regardless of branch count. This equals averaging binary BCE within each branch group. Parquet rows retain branch seeds, paths, and outcomes for auditing. Evaluation reports mean outcome NLL/Brier and `value_mse` against the observed success fraction.
 
 | Variant | Training histories | Prediction |
 |---|---|---|
