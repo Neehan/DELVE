@@ -10,6 +10,7 @@ import zstandard
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
+from critic_only.constants import CONTINUATION_SEEDS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.dataset_loader import input_signature
 from critic_only.data.storage import CriticInputStorage
@@ -32,7 +33,7 @@ def test_input_signature_separates_reference_only_runs() -> None:
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     """Compile real raw artifacts, then select critic inputs from the shared Parquet collection."""
     splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
-    TrajectoryProcessor(config.outputs_directory, config.destination, config.solver_model, splits).compile_trajectories("fixture")
+    TrajectoryProcessor(config.outputs_directory, config.destination, config.solver_model, splits).compile_trajectories("fixture", CONTINUATION_SEEDS)
     return CriticInputProcessor(PreparationConfig(source_directory=config.destination, horizon=config.horizon))
 
 
@@ -44,8 +45,8 @@ def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, 
     assert len(rows) == 4
     assert all("FINAL FUTURE" not in json.dumps(row["messages"]) for row in rows)
     branches = [row for row in rows if row["fork"] == 1]
-    assert all(len(row["branches"]) == 2 for row in branches)
-    assert all(branch["final_correctness"] == branch["seed"] for row in branches for branch in row["branches"])
+    assert all(len(row["branches"]) == 8 for row in branches)
+    assert all(branch["final_correctness"] == branch["seed"] % 2 for row in branches for branch in row["branches"])
     assert all(row["phase"] == ("solve" if row["oracle"] else "revise") and not row["response_finished"] for row in branches)
     assert all(row["remaining_blocks"] == prepared_inputs.horizon - 1 for row in rows)
     assert all(row["split"] == "test" for row in rows if "/2026/" in row["problem_key"])
@@ -195,24 +196,36 @@ def test_nonterminal_input_selection(experiment: str, fork: int | None, expected
     assert select_input_fork(metadata, 3) is None
 
 
-@pytest.mark.parametrize("branch_count", [8, 16])
-def test_grouped_targets_use_all_seeds(prepared_inputs: CollectionFixture, branch_count: int) -> None:
-    """Adding child seeds changes the denominator, without multiplying inputs or exposing their text."""
+@pytest.mark.parametrize("branch_count", [8, 12, 16])
+def test_grouped_targets_use_first_eight_seeds(prepared_inputs: CollectionFixture, branch_count: int) -> None:
+    """Mixed branch counts never change labels or inputs, even when extra runs are unfinished."""
     for source in list(prepared_inputs.outputs_directory.rglob("branch_0")):
-        for seed in range(2, branch_count):
+        if "2026" not in source.parts:
+            continue
+        for seed in range(8, branch_count):
             child = source.parent / f"branch_{seed}"
-            shutil.copytree(source, child)
-            metadata = json.loads((child / "meta.json").read_text())
+            child.mkdir()
+            metadata = json.loads((source / "meta.json").read_text())
             metadata["seed"] = seed
             (child / "meta.json").write_text(json.dumps(metadata))
     rows = list(compile_fixture(prepared_inputs).iter_inputs())
     assert len(rows) == 4
     for row in rows:
-        assert len(row["branches"]) == branch_count
-        assert [branch["seed"] for branch in row["branches"]] == list(range(branch_count))
-        assert sum(branch["final_correctness"] for branch in row["branches"]) / branch_count == 1 / branch_count
+        assert len(row["branches"]) == 8
+        assert [branch["seed"] for branch in row["branches"]] == list(range(8))
+        assert sum(branch["final_correctness"] for branch in row["branches"]) / 8 == 0.5
         assert len(row["messages"]) == (3 if row["oracle"] else 2)
         assert "Observed" not in json.dumps(row["messages"])
+
+
+def test_missing_required_seed_rejected(prepared_inputs: CollectionFixture) -> None:
+    """An incomplete first-eight group fails instead of silently changing its denominator."""
+    path = next(prepared_inputs.outputs_directory.rglob("branch_7")) / "meta.json"
+    metadata = json.loads(path.read_text())
+    metadata["seed"] = 8
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="expected continuation seeds"):
+        list(compile_fixture(prepared_inputs).iter_inputs())
 
 
 def test_duplicate_child_seed_rejected(prepared_inputs: CollectionFixture) -> None:
@@ -237,7 +250,7 @@ def test_different_source_seeds_stay_separate(prepared_inputs: CollectionFixture
             path.write_text(json.dumps(metadata))
     rows = list(compile_fixture(prepared_inputs).iter_inputs())
     assert len(rows) == len({row["prefix_id"] for row in rows}) == 8
-    assert all(len(row["branches"]) == 2 for row in rows)
+    assert all(len(row["branches"]) == 8 for row in rows)
 
 
 def test_future_outcomes_do_not_change_input_tokens(prepared_inputs: CollectionFixture,
@@ -249,6 +262,6 @@ def test_future_outcomes_do_not_change_input_tokens(prepared_inputs: CollectionF
     before = formatter.encode(row, encoding_settings)
     row["branches"][0]["final_correctness"] = 1
     after = formatter.encode(row, encoding_settings)
-    assert before["labels"] == 0.5 and after["labels"] == 1
+    assert before["labels"] == 0.5 and after["labels"] == 0.625
     for key in ("prefix_id", "input_ids", "privileged_input_ids", "input_hash", "privileged_input_hash"):
         assert before[key] == after[key]

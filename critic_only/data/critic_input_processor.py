@@ -14,7 +14,7 @@ from discovery_execution.harness.constants import (
     META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, SOLVE_PHASE,
 )
 from discovery_execution.harness.models import Problem, RunState
-from critic_only.constants import DEFAULT_SEED, HASH_SCALE, INPUT_PREFIX_BLOCKS
+from critic_only.constants import DEFAULT_SEED, HASH_SCALE, INPUT_PREFIX_BLOCKS, CONTINUATION_SEEDS
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLIT_FILENAME
 from discovery_execution.processing.storage import checkpoint_snapshot, file_digest
 from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfig
@@ -125,7 +125,7 @@ class CriticInputProcessor:
         for name, text in zip(self.dataset["trajectory_id"], self.dataset["metadata"]):
             metadata = json.loads(text)
             fork = select_input_fork(metadata, self.config.horizon)
-            if fork is None:
+            if fork is None or metadata["seed"] not in CONTINUATION_SEEDS:
                 continue
             problem_key = tuple(metadata[key] for key in ("competition", "year", "problem_id", "model"))
             source_key = (metadata["source_arm"], metadata["source_seed"], fork)
@@ -193,6 +193,8 @@ class CriticInputProcessor:
             branches = sorted((item for item in group if item[1]["experiment"] == experiment), key=lambda item: item[1]["seed"])
             if not branches:
                 continue
+            if tuple(item[1]["seed"] for item in branches) != CONTINUATION_SEEDS:
+                raise ValueError(f"expected continuation seeds {CONTINUATION_SEEDS}: {source}/{experiment}")
             outcomes, intervention = self._read_matching_branches(branches, parent, snapshot["messages"], problem.solutions[solution_index].sketch)
             oracle = experiment == "continue-oracle"
             messages = snapshot["messages"] + ([intervention] if intervention is not None else [])

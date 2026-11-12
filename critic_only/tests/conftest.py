@@ -106,14 +106,14 @@ def prepared_inputs(tmp_path: Path) -> CollectionFixture:
                   [messages, messages + [{"role": "assistant", "content": "Parent later reasoning"}],
                    messages + [{"role": "assistant", "content": "Parent later reasoning FINAL FUTURE"}]], [1, 1, 0])
         for condition in ("continue", "continue-oracle"):
-            for seed in range(2):
+            for seed in range(8):
                 branch = model_root / f"{condition}-at-1x" / problem["problem_id"] / "seed_0" / f"branch_{seed}"
                 metadata = {**common, "experiment": condition, "seed": seed, "source_seed": 0, "source_arm": "unaided-3x",
                             "continue_at": 1, "solution_index": 0}
                 continued = messages + [{"role": "user", "content": "Use symmetry."}] if condition == "continue-oracle" else messages
                 observed = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed}"}]
                 final = continued + [{"role": "assistant", "content": f"Observed {condition} branch {seed} FINAL FUTURE"}]
-                write_run(branch, metadata, [observed, final], [1, seed])
+                write_run(branch, metadata, [observed, final], [1, seed % 2])
     extra = {**json.loads((references / "2025.jsonl").read_text()), "problem_id": "AIME-2025-I-2"}
     with (references / "2025.jsonl").open("a") as file:
         file.write(json.dumps(extra) + "\n")

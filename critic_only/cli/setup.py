@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
-from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS
+from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, CONTINUATION_SEEDS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.critic_input_processor import CriticInputProcessor
 from critic_only.data.tokenizer import PrefixTokenizer
@@ -101,7 +101,7 @@ def tokenization_settings(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("maximum input length exceeds the model context limit")
     return {"model": model, "revision": revision, "hidden_size": config.hidden_size,
             "horizon": args.horizon, "max_length": args.max_length,
-            "target": CRITIC_TARGET, "prefix_blocks": INPUT_PREFIX_BLOCKS,
+            "target": CRITIC_TARGET, "prefix_blocks": INPUT_PREFIX_BLOCKS, "continuation_seeds": list(CONTINUATION_SEEDS),
             "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
@@ -147,7 +147,7 @@ def main() -> None:
     if args.outputs_repo:
         source, revision = download_outputs(args.outputs_repo, args.revision, args.solver_model)
     processor = TrajectoryProcessor(source, args.destination / args.solver_model, args.solver_model, splits)
-    processor.compile_trajectories(revision)
+    processor.compile_trajectories(revision, CONTINUATION_SEEDS)
     prepare_critic_inputs(processor.destination, settings)
     print(f"Saved trajectories and critic inputs: {processor.destination}", flush=True)
 
