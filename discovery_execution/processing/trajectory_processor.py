@@ -10,6 +10,7 @@ from typing import Any
 
 import zstandard
 
+from discovery_execution.audit.answer_grader import validate_grading_rule
 from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, CONTINUATION_EXPERIMENTS,
 )
@@ -90,6 +91,7 @@ class TrajectoryProcessor:
         conversation_text = zstandard.decompress((directory / CONVERSATION_FILENAME).read_bytes()).decode()
         audit_text = (directory / AUDIT_FILENAME).read_text()
         metadata, audit = json.loads(metadata_text), json.loads(audit_text)
+        validate_grading_rule(audit, str(directory))
         state = RunState.model_validate_json(conversation_text)
         budget = metadata["compute_multiplier_k"] * OUTPUT_TOKENS_PER_BLOCK
         if not audit["complete"] or audit["output_tokens"] != budget or state.output_tokens != budget:

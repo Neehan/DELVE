@@ -77,7 +77,9 @@ async def test_full_trajectory(experiment: str, injection: int, compute_multipli
     assert not (directory / AUDIT_FILENAME).exists()
     AuditRunner().run(root, None, None, {})
     audit = json.loads((directory / AUDIT_FILENAME).read_text(encoding="utf-8"))
-    assert audit["complete"] and all(item["correctness"]["score"] == 0 for item in audit["checkpoints"].values())
+    assert audit["complete"]
+    # The first wrong box is a critique; later solve/revise boxes really replace the correct answer.
+    assert [item["correctness"]["score"] for item in audit["checkpoints"].values()] == [1] + [0] * (compute_multiplier_k - 1)
     assert_intervention(records, experiment, injection, compute_multiplier_k)
 
 
