@@ -54,7 +54,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
 def test_training_resume(mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                          training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
-    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
+    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     training_rows = reference_token_rows if mode == "lora" else training_rows
     full = make_trainer(tmp_path / "full", settings, tokenizer, training_rows, [])
@@ -100,7 +100,7 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
                                  training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]],
                                  tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Match independent reference-only losses and gradients for every critic and training mode."""
-    settings = critic_settings(variant).model_copy(update={"training_mode": mode,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     column = "input_ids" if mode == "lora" else "hidden_state"
     source = reference_token_rows if mode == "lora" else training_rows
@@ -140,7 +140,7 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
 def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Uneven microbatches must give each trajectory equal weight in an optimizer update."""
-    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode,
+    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     rows = reference_token_rows if mode == "lora" else training_rows
     dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": 1, "oracle": True}])

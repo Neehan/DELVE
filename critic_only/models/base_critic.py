@@ -15,13 +15,13 @@ from critic_only.models.models import CriticConfig
 class BaseCritic(nn.Module, ABC):
     """Turn cached vectors or Qwen outputs into critic predictions.
 
-    forward uses cached vectors when language_model is None; otherwise it runs Qwen with LoRA. Both paths use the same MLP. Subclasses implement predict; this base supplies the per-prediction loss and trainable-weight save/load methods.
+    forward uses cached vectors when language_model is None; otherwise it runs Qwen with trainable adapters or trainable final blocks. Both paths use the same MLP. Subclasses implement predict; this base supplies the per-prediction loss and trainable-weight save/load methods.
     """
 
     def __init__(self, settings: CriticConfig) -> None:
         """Build the shared two-layer GELU MLP.
 
-        language_model starts as None for cached-vector inputs. The loader attaches Qwen with adapters for LoRA mode.
+        language_model starts as None for cached-vector inputs. The loader attaches Qwen for token-based training.
 
         Args:
             settings: Input vector size, MLP width, loss weight, and checkpoint settings.
@@ -44,7 +44,7 @@ class BaseCritic(nn.Module, ABC):
             directory: Checkpoint directory containing critic configuration and safetensors weights.
 
         Returns:
-            None. Updates the MLP, prediction heads, and any adapters; Trainer restores optimizer state separately.
+            None. Updates the MLP, prediction heads, and trainable Qwen parameters; Trainer restores optimizer state separately.
         """
         settings = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
         if settings != self.settings:
@@ -63,7 +63,7 @@ class BaseCritic(nn.Module, ABC):
     def save(self, directory: Path) -> None:
         """Save the critic settings and trainable weights.
 
-        Includes the MLP, prediction heads, and any LoRA adapters. Frozen Qwen weights are identified by model revision rather than copied into each checkpoint.
+        Includes the MLP, prediction heads, and trainable Qwen parameters. Frozen Qwen weights are identified by model revision rather than copied into each checkpoint.
 
         Args:
             directory: Destination checkpoint directory, created if needed.
@@ -80,10 +80,10 @@ class BaseCritic(nn.Module, ABC):
     def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
         """Convert each input into a vector, apply the MLP, and predict final answer correctness.
 
-        N counts input prefixes. Frozen mode uses saved vectors; LoRA computes Qwen's last non-padding token vector with gradients. Neither path generates text.
+        N counts input prefixes. Frozen mode uses saved vectors; token-based training computes Qwen's last non-padding token vector with gradients. Neither path generates text.
 
         Args:
-            inputs: Cached hidden_state [N, input_size], or LoRA input_ids and attention_mask [N, L]. Tokens are right-padded; mask entries are 1 for real tokens and 0 for padding.
+            inputs: Cached hidden_state [N, input_size], or token input_ids and attention_mask [N, L]. Tokens are right-padded; mask entries are 1 for real tokens and 0 for padding.
             oracle: Solver-sketch flags [N], not flags for critic-only references.
             remaining_blocks: Budget left after each history [N]. The prompt also contains this budget.
 
