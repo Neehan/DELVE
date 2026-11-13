@@ -1,4 +1,4 @@
-"""Exercise setup, hidden-state caching, frozen/LoRA training, and evaluation without network or GPU dependencies."""
+"""Exercise setup, hidden-state caching, frozen/LoRA/full training, and evaluation without network or GPU dependencies."""
 
 import json
 import weakref
@@ -73,7 +73,7 @@ def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]
 @pytest.mark.parametrize("mode", ["frozen", "lora", "full"])
 def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic_settings: Callable[[str], CriticConfig],
     training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """All variants train from features only, use reference-only losses, and export final-outcome predictions."""
+    """All variants train from cached vectors or tokens and export reference-conditioned final-outcome predictions."""
     settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     root, output, report = tmp_path / "data", tmp_path / "run", tmp_path / "evaluation"
