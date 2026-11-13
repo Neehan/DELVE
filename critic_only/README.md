@@ -12,7 +12,7 @@ With one source seed per problem, 1,000 problems give 2,000 inputs across the tw
 
 **Workflow:** setup → cache hidden states → train → evaluate. Setup writes reusable Parquet chunks and tokenizes both input versions. The seed-1234 problem split reserves 1,000 pre-2026 problems for training, remaining older problems for validation, and 2026 onward for test.
 
-Frozen mode trains a two-layer, width-512 GELU MLP on cached Qwen vectors. For LoRA, skip caching and pass `--training-mode lora --lora-layers N` (last N layers; default 64). Set `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce CUDA memory fragmentation. The solver stays fixed in both modes.
+Frozen mode trains a two-layer, width-512 GELU MLP on cached Qwen vectors. To train from tokens, skip caching and use `--training-mode lora` for adapters or `--training-mode full` for all weights in the selected blocks. Both use `--trainable-layers N` to select the last N transformer blocks (default 64, capped at model depth), and train the same MLP; embeddings and output normalization stay frozen. Set `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce CUDA memory fragmentation. The solver stays fixed in all modes.
 
 Run from the repository root with matching problem files in `data/datasets`. Use a separate environment from vLLM; GPU encoding and LoRA require a compatible `flash-attn` installation in addition to the dependencies below.
 

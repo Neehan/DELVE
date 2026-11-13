@@ -1,4 +1,4 @@
-"""Choose cached vectors for frozen training or cached tokens for LoRA training."""
+"""Choose cached vectors for frozen training or cached tokens for language-model training."""
 
 import hashlib
 import json
@@ -18,7 +18,7 @@ def load_critic_splits(directory: Path, splits: tuple[str, ...], training_mode: 
     Args:
         directory: Processed model directory with its manifest and split directories.
         splits: Requested train, validation, or test partitions.
-        training_mode: frozen reads cached vectors; lora reads exact token sequences.
+        training_mode: frozen reads cached vectors; other modes read exact token sequences.
 
     Returns:
         tuple[DatasetDict, dict[str, Any]]: Verified datasets and model manifest. Token datasets use the library's memory-mapped Arrow cache; vectors are loaded into RAM.
@@ -38,10 +38,10 @@ def input_signature(manifest: dict[str, Any], training_mode: str) -> str:
 
     Args:
         manifest: Processed model metadata with a completed token or hidden-state section.
-        training_mode: frozen or lora.
+        training_mode: frozen, lora, or full.
 
     Returns:
-        str: Hash of the selected input section. Adding an optional hidden-state cache does not change a LoRA run's identity.
+        str: Hash of the selected input section. Adding an optional hidden-state cache does not change a token-based run's identity.
     """
     section = manifest["features" if training_mode == "frozen" else "tokenization"]
     return hashlib.sha256(json.dumps({"cache": section, "input_view": CRITIC_INPUT_VIEW}, sort_keys=True).encode()).hexdigest()

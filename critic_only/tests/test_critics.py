@@ -212,7 +212,7 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
 def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfig],
                                   tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
     """Token inputs train adapters and heads while the pretrained Qwen parameters remain frozen."""
-    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": "lora", "lora_rank": 2, "lora_alpha": 4})
+    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": "lora", "lora_rank": 2, "lora_alpha": 4, "trainable_layers": 64})
     model = create_critic(settings, True)
     batch = CriticBatcher(tokenizer)(reference_token_rows)
     logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
@@ -228,8 +228,8 @@ def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfi
 
 
 @pytest.mark.parametrize("layer_count,expected_layers", [(1, {2}), (2, {1, 2}), (3, {0, 1, 2}),
-                                                       (10, {0, 1, 2}), (None, {0, 1, 2})])
-def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int],
+                                                       (10, {0, 1, 2})])
+def test_lora_layer_selection(layer_count: int, expected_layers: set[int],
                               critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                               reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Only selected final layers receive adapters; gradients and checkpoint restoration remain correct."""
@@ -240,7 +240,7 @@ def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int]
     directory = tmp_path / "three-layer-model"
     Qwen3Model(config).save_pretrained(directory)
     settings = settings.model_copy(update={"model": str(directory), "training_mode": "lora",
-                                           "lora_rank": 2, "lora_alpha": 4, "lora_layers": layer_count})
+                                           "lora_rank": 2, "lora_alpha": 4, "trainable_layers": layer_count})
     model = create_critic(settings, True)
     batch = CriticBatcher(tokenizer)(reference_token_rows)
     model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).sum().backward()
@@ -261,12 +261,49 @@ def test_lora_layer_selection(layer_count: int | None, expected_layers: set[int]
     checkpoint = tmp_path / "checkpoint"
     model.save(checkpoint)
     saved_settings = CriticConfig.model_validate_json((checkpoint / CONFIG_FILENAME).read_text())
-    assert saved_settings.lora_layers == layer_count
+    assert saved_settings.trainable_layers == layer_count
     restored = create_critic(saved_settings, True)
     restored.load_from_weights(checkpoint)
     restored.eval()
     actual = restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("layer_count,expected_layers", [(1, {2}), (2, {1, 2}), (3, {0, 1, 2}), (64, {0, 1, 2})])
+def test_full_layer_selection_updates_and_restores(layer_count: int, expected_layers: set[int], critic_settings: Callable[[str], CriticConfig],
+    tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+    """Full tuning changes only selected final blocks and head; a fresh checkpoint reload reproduces its logits."""
+    settings = critic_settings("ppo-oracle-critic")
+    config = Qwen3Config.from_pretrained(settings.model)
+    config.num_hidden_layers = 3
+    config.layer_types = ["full_attention"] * config.num_hidden_layers
+    directory = tmp_path / "three-layer-model"
+    Qwen3Model(config).save_pretrained(directory)
+    settings = settings.model_copy(update={"model": str(directory), "training_mode": "full", "trainable_layers": layer_count})
+    model = create_critic(settings, True)
+    batch = CriticBatcher(tokenizer)(reference_token_rows)
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    assert all("lora_" not in name for name in before)
+    assert trainable == {name for name in before if not name.startswith("language_model.")
+                         or any(name.startswith(f"language_model.layers.{index}.") for index in expected_layers)}
+    assert all(parameter.dtype == torch.float32 for parameter in model.parameters() if parameter.requires_grad)
+    model.train()
+    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    model.loss(logits, batch["labels"], batch["oracle"]).mean().backward()
+    assert all((parameter.grad is not None) == (name in trainable) for name, parameter in model.named_parameters())
+    torch.optim.AdamW([parameter for parameter in model.parameters() if parameter.requires_grad], lr=1e-4).step()
+    changed = {name for name, parameter in model.named_parameters() if not torch.equal(parameter, before[name])}
+    assert changed <= trainable
+    assert all(any(name.startswith(f"language_model.layers.{index}.") for name in changed) for index in expected_layers)
+    model.eval()
+    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).detach()
+    checkpoint = tmp_path / "full-layer-checkpoint"
+    model.save(checkpoint)
+    restored = create_critic(CriticConfig.model_validate_json((checkpoint / CONFIG_FILENAME).read_text()), True)
+    restored.load_from_weights(checkpoint)
+    restored.eval()
+    torch.testing.assert_close(restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"]), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("successes,trials", [(0, 8), (3, 8), (7, 16), (16, 16)])

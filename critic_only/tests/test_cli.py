@@ -1,4 +1,4 @@
-"""Exercise setup, hidden-state caching, frozen/LoRA training, and evaluation without network or GPU dependencies."""
+"""Exercise setup, hidden-state caching, frozen/LoRA/full training, and evaluation without network or GPU dependencies."""
 
 import json
 import weakref
@@ -62,7 +62,7 @@ def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]
         checksums[str(path.relative_to(root))] = file_digest(path)
     tokenization = {"settings": {"model": settings.model, "revision": settings.revision,
                                 "horizon": settings.horizon, "hidden_size": settings.input_size},
-                    "complete": True, "shards": checksums if settings.training_mode == "lora" else {}}
+                    "complete": True, "shards": checksums if settings.training_mode != "frozen" else {}}
     write_json_atomic(root / "manifest.json", {"tokenization": tokenization,
         "features": {"complete": True, "signature": settings.data_signature, "shards": checksums,
                      "settings": {"hidden_size": settings.input_size}}})
@@ -70,11 +70,11 @@ def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("fraction", [1.0, 0.5])
-@pytest.mark.parametrize("mode", ["frozen", "lora"])
+@pytest.mark.parametrize("mode", ["frozen", "lora", "full"])
 def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic_settings: Callable[[str], CriticConfig],
     training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """All variants train from features only, use reference-only losses, and export final-outcome predictions."""
-    settings = critic_settings(variant).model_copy(update={"training_mode": mode,
+    """All variants train from cached vectors or tokens and export reference-conditioned final-outcome predictions."""
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     root, output, report = tmp_path / "data", tmp_path / "run", tmp_path / "evaluation"
     save_features(root, settings, training_rows if mode == "frozen" else reference_token_rows)
@@ -140,26 +140,37 @@ def test_setup_and_extraction_cli(prepared_inputs: CollectionFixture, critic_set
     api.model_info.assert_called_once()
 
 
-@pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("frozen", "1")])
-def test_invalid_lora_layers(mode: str, count: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject nonpositive layer counts and LoRA layer selection for frozen training before loading data."""
-    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--lora-layers", count])
-    with pytest.raises(ValueError, match="LoRA"):
+@pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("frozen", "1"), ("full", "0"), ("full", "-1")])
+def test_invalid_trainable_layers(mode: str, count: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject nonpositive layer counts and layer selection for frozen training before loading data."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--trainable-layers", count])
+    with pytest.raises(ValueError, match="trainable-layers"):
         train.parse_arguments()
 
 
-def test_lora_layers_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mode", ["lora", "full"])
+def test_trainable_layers_argument(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pass the requested final-layer count through the training CLI."""
-    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "lora", "--lora-layers", "1"])
-    assert train.parse_arguments().lora_layers == 1
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--trainable-layers", "1"])
+    assert train.parse_arguments().trainable_layers == 1
 
 
-def test_default_lora_layers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default LoRA to 64 final layers while keeping frozen mode free of adapter settings."""
-    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "lora"])
-    assert train.parse_arguments().lora_layers == 64
+@pytest.mark.parametrize("mode", ["lora", "full"])
+def test_default_trainable_layers(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default token-based training to 64 final layers while keeping frozen mode free of adapter settings."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode])
+    assert train.parse_arguments().trainable_layers == 64
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused"])
-    assert train.parse_arguments().lora_layers is None
+    assert train.parse_arguments().trainable_layers is None
+
+
+@pytest.mark.parametrize("mode", ["frozen", "full"])
+@pytest.mark.parametrize("option", ["--lora-rank", "--lora-alpha"])
+def test_adapter_options_require_lora(mode: str, option: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject adapter settings for modes that train without adapters."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, option, "32"])
+    with pytest.raises(ValueError, match="LoRA options"):
+        train.parse_arguments()
 
 
 def test_pinned_hf_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
