@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
+from discovery_execution.audit.answer_grader import validate_grading_rule
 from discovery_execution.audit.models import AuditRecord
 from discovery_execution.harness.constants import AUDIT_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME
 from discovery_execution.harness.storage import atomic_write
@@ -50,6 +51,7 @@ class AuditCompiler:
 
     def _validate_audit(self, path: Path, settings: dict[str, Any], result: dict[str, Any]) -> None:
         """Validate absolute checkpoint ranges and both parent and branch identities before export."""
+        validate_grading_rule(result, str(path))
         start = settings.get("continue_at", 0) + 1
         expected = {f"{k}x" for k in range(start, result["output_tokens"] // OUTPUT_TOKENS_PER_BLOCK + 1)}
         if not expected or set(result["checkpoints"]) != expected or result["output_tokens"] % OUTPUT_TOKENS_PER_BLOCK:

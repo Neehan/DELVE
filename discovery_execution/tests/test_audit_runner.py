@@ -85,6 +85,21 @@ def test_failed_compilation_preserves_export(saved_runs: list[Path], tmp_path: P
     assert compiled.read_bytes() == before
 
 
+def test_legacy_grades_cannot_mix_with_new_audits(saved_runs: list[Path], tmp_path: Path) -> None:
+    """Reject old answer-selection semantics without replacing the compiled export."""
+    AuditRunner().run(tmp_path, None, None, {})
+    directory = saved_runs[0].parent.parent
+    compiled = directory / COMPILED_AUDIT_FILENAME
+    before = compiled.read_bytes()
+    path = saved_runs[0] / AUDIT_FILENAME
+    result = json.loads(path.read_text())
+    del result["grading_rule"]
+    write_json(path, result)
+    with pytest.raises(ValueError, match="regrade"):
+        AuditCompiler(directory).compile()
+    assert compiled.read_bytes() == before
+
+
 def test_audit_single_seed_directory(saved_runs: list[Path]) -> None:
     """A leaf directory is also a complete audit selection."""
     AuditRunner().run(saved_runs[0], None, None, {})

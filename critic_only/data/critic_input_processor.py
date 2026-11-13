@@ -9,6 +9,7 @@ from collections.abc import Iterator
 
 from datasets import Dataset, concatenate_datasets
 
+from discovery_execution.audit.answer_grader import validate_grading_rule
 from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CONTINUATION_EXPERIMENTS, CONVERSATION_FILENAME,
     META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, SOLVE_PHASE,
@@ -308,6 +309,7 @@ class CriticInputProcessor:
             BranchOutcome: Branch seed, trajectory ID, and correctness of the last answer at the configured final horizon.
         """
         audit = self._read_json(path / AUDIT_FILENAME)
+        validate_grading_rule(audit, str(path))
         if audit["complete"] is not True or audit["output_tokens"] != self.config.horizon * OUTPUT_TOKENS_PER_BLOCK:
             raise ValueError(f"incomplete branch audit: {path}")
         expected = [f"{k}x" for k in range(fork + 1, self.config.horizon + 1)]

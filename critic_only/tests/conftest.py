@@ -14,6 +14,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
+from discovery_execution.audit.constants import GRADING_RULE
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
 from critic_only.tests.models import CollectionFixture
@@ -80,7 +81,7 @@ def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[st
              "phase": "revise", "injected": oracle, "response_finished": False,
              "requests": requests, "checkpoints": checkpoints}
     (path / "conversation.json.zst").write_bytes(zstandard.compress(json.dumps(state).encode()))
-    audit = {"complete": True, "output_tokens": len(histories) * OUTPUT_TOKENS_PER_BLOCK + fork * OUTPUT_TOKENS_PER_BLOCK,
+    audit = {"grading_rule": GRADING_RULE, "complete": True, "output_tokens": len(histories) * OUTPUT_TOKENS_PER_BLOCK + fork * OUTPUT_TOKENS_PER_BLOCK,
              "checkpoints": {f"{block}x": {"correctness": {"score": score}}
                              for block, score in enumerate(outcomes, start=fork + 1)}}
     (path / "audit.json").write_text(json.dumps(audit))

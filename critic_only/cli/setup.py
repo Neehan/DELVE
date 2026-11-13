@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
+from discovery_execution.audit.constants import GRADING_RULE
 from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, CONTINUATION_SEEDS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.critic_input_processor import CriticInputProcessor
@@ -101,7 +102,8 @@ def tokenization_settings(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("maximum input length exceeds the model context limit")
     return {"model": model, "revision": revision, "hidden_size": config.hidden_size,
             "horizon": args.horizon, "max_length": args.max_length,
-            "target": CRITIC_TARGET, "prefix_blocks": INPUT_PREFIX_BLOCKS, "continuation_seeds": list(CONTINUATION_SEEDS),
+            "target": CRITIC_TARGET, "grading_rule": GRADING_RULE,
+            "prefix_blocks": INPUT_PREFIX_BLOCKS, "continuation_seeds": list(CONTINUATION_SEEDS),
             "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 

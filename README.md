@@ -4,9 +4,9 @@ Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` ha
 
 Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
-The frozen-solver critic takes the partial conversation, current phase, and remaining budget, and predicts the probability that the last boxed answer will be correct when that budget ends.
+The frozen-solver critic takes the partial conversation, current phase, and remaining budget, and predicts the probability that the last complete boxed answer from solving or revising will be correct when that budget ends.
 
-Training labels come from continuing the same self-refinement harness and grading the last boxed answer: 1 if correct, 0 otherwise; earlier correct answers do not override the final grade.
+Training labels come from continuing the same self-refinement harness and grading that answer: 1 if correct, 0 otherwise. Critiques cannot replace it, and an unfinished box leaves the previous complete answer in force. A later complete wrong answer still replaces an earlier correct one.
 
 [Critic-only experiments](critic_only/README.md) cache frozen Qwen representations and compare PPOCritic, PPOOracleCritic, and DECritic MLPs before online RL.
 
@@ -130,7 +130,7 @@ On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the ser
 mkdir -p logs/slurm && sbatch discovery_execution/scripts/experiment.sbatch --model qwen3-1.7b --competition aime --year 2024 --experiment unaided --compute-multiplier-k 1 --seeds {0..15}
 ```
 
-Grades use DE's `correctness.score` field, restricted to 0 or 1. Each checkpoint's last boxed answer is checked with Math-Verify, following [Qwen's final-box convention](https://github.com/QwenLM/Qwen2.5-Math/blob/main/evaluation/parser.py). Missing or unparseable answers score 0. Raw audits preserve regressions; only the framework turns scores `1, 0, 0` into cumulative success `1, 1, 1`.
+Grades use DE's `correctness.score` field, restricted to 0 or 1. Math-Verify checks the last complete boxed answer from solve/revise responses; replies to the harness's exact critique instruction are excluded. Missing, empty, or unparseable submitted answers score 0. Raw audits preserve wrong-answer regressions; only the framework turns scores `1, 0, 0` into cumulative success `1, 1, 1`. Audits record `grading_rule: last-complete-solve-revise-box-v1`; compilation and critic preparation reject legacy grades. Preserve old outputs/results, re-audit a separate copy of each complete arm, and rebuild processed labels before new experiments.
 
 **Fit the frameworks**
 

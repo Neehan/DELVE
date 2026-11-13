@@ -68,12 +68,32 @@ def test_shared_collection_and_tokenization(prepared_inputs: CollectionFixture, 
         storage.save_inputs(encoded, tokenizer, encoding_settings)
 
 
+def test_legacy_processed_audits_cannot_supply_labels(prepared_inputs: CollectionFixture) -> None:
+    """Reusing existing trajectory Parquet must not bypass the new grading-rule check."""
+    processor = compile_fixture(prepared_inputs)
 
-@pytest.mark.parametrize("damage", ["snapshot", "audit", "source", "sketch", "sampling", "phase"])
+    def remove_rule(row: dict[str, Any]) -> dict[str, str]:
+        """Return a legacy audit column for this fixture row without changing its outcomes."""
+        audit = json.loads(row["audit"])
+        del audit["grading_rule"]
+        return {"audit": json.dumps(audit)}
+
+    processor.dataset = processor.dataset.map(remove_rule)
+    with pytest.raises(ValueError, match="regrade"):
+        list(processor.iter_inputs())
+
+
+
+@pytest.mark.parametrize("damage", ["snapshot", "audit", "source", "sketch", "sampling", "phase", "grading_rule"])
 def test_invalid_collection_rejected(prepared_inputs: CollectionFixture, damage: str) -> None:
     """Reject mismatched snapshots, outcomes, source histories, sketches, and branch settings."""
     branch = next(path for path in prepared_inputs.outputs_directory.rglob("branch_0") if "continue-oracle" in str(path))
-    if damage == "audit":
+    if damage == "grading_rule":
+        path = branch / "audit.json"
+        data = json.loads(path.read_text())
+        del data["grading_rule"]
+        path.write_text(json.dumps(data))
+    elif damage == "audit":
         path = branch / "audit.json"
         data = json.loads(path.read_text())
         data["complete"] = False
