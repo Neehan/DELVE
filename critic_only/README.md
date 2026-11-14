@@ -1,32 +1,28 @@
 # Critic-only experiments
 
-Train a critic to predict final-answer correctness at 5× from a shared 1× solver state. Setup groups `continue-at-1x` and `continue-oracle-at-1x` runs separately. The input is the source history plus the optional saved hint, **before any child continuation**. The target is `successful continuations / total continuations`; only seeds 0–7 are used, and every included group must contain all eight. Later seeds are ignored before reading their artifacts, so ongoing generation does not change the target. Different source seeds are separate inputs, and conflicting hints or sampling settings are rejected.
+Predict each trajectory’s final answer correctness at 5× from its first 1× of reasoning. Setup selects unaided and oracle-at-zero root runs, seeds 0–7; each row keeps its own history and verified binary outcome. With complete coverage, 1,000 problems give 8,000 unaided and 8,000 oracle rows. Continuation arms do not supply critic inputs.
 
-With one source seed per problem, 1,000 problems give 2,000 inputs across the two conditions. Both reference and no-reference views remain cached for future experiments; this pilot trains and evaluates only the reference-containing view. Each row contributes one BCE loss, with equal weight regardless of branch count. This equals averaging binary BCE within each branch group. Parquet rows retain branch seeds, paths, and outcomes for auditing. Evaluation reports mean outcome NLL/Brier and `value_mse` against the observed success fraction.
+PPO and OraclePPO apply the same MLP/value head to every solver token’s final-layer hidden state. Each causal prefix predicts that trajectory’s final reward using binary cross-entropy. Average losses over solver tokens within each trajectory, then average trajectories. References, instructions, role delimiters and padding receive no loss. This is Monte Carlo supervision, without GAE or hidden-state pooling.
 
-| Variant | Training histories | Prediction |
+Training and evaluation use the matching reference solution. The system prompt states the total budget; endpoint phase/completion metadata is omitted because earlier positions must not see it. Validation `eval_loss` measures token-averaged loss; `terminal_nll` scores only the 1× endpoint and selects the best checkpoint. Metrics weight problems equally.
+
+| Variant | Training histories | Supervision |
 |---|---|---|
-| `ppo-critic` | Unaided | Direct scalar |
-| `ppo-oracle-critic` | Unaided + oracle | Direct scalar |
-| `de-critic` | Unaided + oracle | Discovery–execution decomposition |
+| `ppo-critic` | Unaided | Every solver token |
+| `ppo-oracle-critic` | Unaided + oracle | Every solver token |
+| `de-critic` | Unaided + oracle | Endpoint only; existing block-based model |
 
-**Workflow:** setup → cache hidden states → train → evaluate. Setup writes reusable Parquet chunks and tokenizes both input versions. The seed-1234 problem split reserves 1,000 pre-2026 problems for training, remaining older problems for validation, and 2026 onward for test.
-
-Frozen mode trains a two-layer, width-512 GELU MLP on cached Qwen vectors. To train from tokens, skip caching and use `--training-mode lora` for adapters or `--training-mode full` for all weights in the selected blocks. Both use `--trainable-layers N` to select the last N transformer blocks (default 64, capped at model depth), and train the same MLP; embeddings and output normalization stay frozen. Set `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce CUDA memory fragmentation. The solver stays fixed in all modes.
-
-Run from the repository root with matching problem files in `data/datasets`. Use a separate environment from vLLM; GPU encoding and LoRA require a compatible `flash-attn` installation in addition to the dependencies below.
+**Workflow:** setup → train → evaluate. LoRA/full modes train on tokens. `--trainable-layers N` selects the last N transformer blocks. Frozen mode remains an endpoint-only control: first run `cache_hidden_states`, then train the width-512 GELU MLP on cached final-solver-token vectors. No full token-state cache is written.
 
 ```bash
 uv sync --locked --extra frozen
-uv run --extra frozen python -m critic_only.cli.setup --outputs-repo notadib/DELVE-Outputs --revision <outputs-commit> --solver-model qwen3-4b-instruct-2507 --destination data/outputs/processed-shared-prefix
-
-DATA=data/outputs/processed-shared-prefix/qwen3-4b-instruct-2507
-RUN=output/critic_only/de-critic
-uv run --extra frozen torchrun --standalone --nproc_per_node=2 -m critic_only.cli.cache_hidden_states --data "$DATA"
-uv run --extra frozen python -m critic_only.cli.train --data "$DATA" --variant de-critic --output "$RUN"
-uv run --extra frozen python -m critic_only.cli.evaluate --data "$DATA" --checkpoint "$RUN/best" --split test --destination "$RUN/test"
+uv run --extra frozen python -m critic_only.cli.setup --outputs-directory data/outputs --solver-model qwen3-4b-instruct-2507 --destination data/outputs/processed-token-values
+DATA=data/outputs/processed-token-values/qwen3-4b-instruct-2507
+RUN=output/critic_only/token-ppo
+uv run --extra frozen torchrun --standalone --nproc_per_node=2 -m critic_only.cli.train --data "$DATA" --variant ppo-critic --training-mode full --trainable-layers 1 --learning-rate 3e-6 --output "$RUN"
+uv run --extra frozen python -m critic_only.cli.evaluate --data "$DATA" --checkpoint "$RUN/best" --split validation --destination "$RUN/validation"
 ```
 
-Setup also accepts `--outputs-directory` for local trajectories. Hidden-state caching resumes completed chunks. Training saves metrics and epoch checkpoints; resume with `--resume <checkpoint-directory>`. Select settings on validation, then evaluate test once. Use each command's `--help` for training and ablation options.
+GPU execution requires compatible FlashAttention-2 and a separate environment from vLLM. Training saves resumable checkpoints and metrics; use `--resume` to continue. Keep seed-1234 problem splits: 1,000 pre-2026 training problems, remaining older problems for validation, and 2026 onward for test. Select settings on validation before evaluating test.
 
-Grades use the last complete solve/revise box, ignoring critique boxes and unfinished boxes. Preserve original outputs/results, re-audit separate copies of complete arms, and rerun setup into a new destination with the existing `splits.parquet` to retain assignments. Legacy audits are rejected. This grading change leaves prompts and token IDs unchanged, so Qwen vectors remain reusable, but cached rows also contain labels: they must be rebuilt or explicitly migrated with matched prefix IDs/token hashes and new provenance. Do not copy old labeled caches unchanged or resume old training checkpoints against new targets. Setup refuses to overwrite an existing model directory.
+Rerun setup into a new destination, preserving the existing `splits.parquet`. Old shared-prefix token/vector caches are incompatible with the new histories, prompt and masks; do not reuse them or overwrite previous results. Grades still use the last complete solve/revise box and exclude critique/unfinished boxes. Legacy grading rules remain rejected.

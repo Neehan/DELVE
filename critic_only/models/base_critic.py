@@ -15,8 +15,10 @@ from critic_only.models.models import CriticConfig
 class BaseCritic(nn.Module, ABC):
     """Turn cached vectors or Qwen outputs into critic predictions.
 
-    forward uses cached vectors when language_model is None; otherwise it runs Qwen with trainable adapters or trainable final blocks. Both paths use the same MLP. Subclasses implement predict; this base supplies the per-prediction loss and trainable-weight save/load methods.
+    Subclasses implement predict. PPO variants enable token_supervision for live Qwen; DE keeps its endpoint-only block model. Cached vectors always supply one endpoint. This base shares the MLP, Monte Carlo BCE and checkpoint storage.
     """
+
+    token_supervision = False
 
     def __init__(self, settings: CriticConfig) -> None:
         """Build the shared two-layer GELU MLP.
@@ -78,24 +80,26 @@ class BaseCritic(nn.Module, ABC):
         (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
 
     def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Convert each input into a vector, apply the MLP, and predict final answer correctness.
-
-        N counts input prefixes. Frozen mode uses saved vectors; token-based training computes Qwen's last non-padding token vector with gradients. Neither path generates text.
+        """Predict values from cached endpoints or a live causal transformer.
 
         Args:
-            inputs: Cached hidden_state [N, input_size], or token input_ids and attention_mask [N, L]. Tokens are right-padded; mask entries are 1 for real tokens and 0 for padding.
-            oracle: Solver-sketch flags [N], not flags for critic-only references.
-            remaining_blocks: Budget left after each history [N]. The prompt also contains this budget.
+            inputs: Cached hidden_state [B,H], or input_ids/attention_mask [B,L]. Saved token inputs end at
+                the last solver token. solver_mask marks eligible training positions and is used by Trainer.
+            oracle: Solver-hint flags [B], separate from critic reference availability.
+            remaining_blocks: Endpoint budget [B], used only by the block-based DE prediction.
 
         Returns:
-            Tensor: Float32 success logits [N]; sigmoid gives probabilities.
+            Tensor: PPO/OraclePPO return logits [B,L] for live tokens, one value per causal prefix. Cached
+            features and DE return endpoint logits [B]. No hidden states are averaged across positions.
         """
         if self.language_model is None:
             hidden_states = inputs["hidden_state"]
         else:
-            output = self.language_model(**inputs, use_cache=False)
-            positions = inputs["attention_mask"].sum(dim=-1) - 1
-            hidden_states = output.last_hidden_state[torch.arange(len(positions), device=positions.device), positions]
+            output = self.language_model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], use_cache=False)
+            hidden_states = output.last_hidden_state
+            if not self.token_supervision:
+                positions = inputs["attention_mask"].sum(dim=-1) - 1
+                hidden_states = hidden_states[torch.arange(len(positions), device=positions.device), positions]
         projected = self.hidden_state_projection(hidden_states.float())
         return self.predict(projected, oracle, remaining_blocks)
 
@@ -104,28 +108,31 @@ class BaseCritic(nn.Module, ABC):
         """Map MLP outputs to final-success logits; each critic variant implements this.
 
         Args:
-            hidden: MLP outputs [N, settings.hidden_size], one per input prefix.
-            oracle: Solver-sketch flags [N]; DE uses these to select execution-only predictions.
-            remaining_blocks: Future budget [N], from 1 through settings.horizon - 1.
+            hidden: MLP outputs [B,H] for endpoints or [B,L,H] for token-wise PPO prediction.
+            oracle: Solver-sketch flags [B]; DE uses these to select execution-only predictions.
+            remaining_blocks: Endpoint budget [B], from 1 through settings.horizon - 1.
 
         Returns:
-            Tensor: Float32 logits [N], before sigmoid. These go directly into the binary cross-entropy loss.
+            Tensor: Float32 logits [B] or [B,L], matching the leading dimensions of hidden. These go directly into binary cross-entropy.
         """
         raise NotImplementedError
 
     def loss(self, logits: Tensor, labels: Tensor, oracle: Tensor) -> Tensor:
-        """Measure prediction error against the fraction of successful continuations.
-
-        For k successes in n continuations, the target is k/n. BCE with this target equals the mean BCE against all n binary outcomes. BaseTrainer gives each source state equal weight, regardless of its branch count.
+        """Compute Monte Carlo binary cross-entropy without reducing token or trajectory dimensions.
 
         Args:
-            logits: Predicted success logits [N]; sigmoid(logit) is the probability of success.
-            labels: Observed success fractions [N] in [0, 1].
-            oracle: Solver-sketch flags [N]. True applies settings.oracle_weight to that loss. A critic-only reference solution does not change this flag.
+            logits: Endpoint logits [B] or causal token logits [B,L].
+            labels: Each trajectory's verified final outcome [B]. For token predictions, the same sampled
+                return supervises every position; intermediate correctness labels are not required.
+            oracle: Solver-hint flags [B]; oracle_weight scales those trajectories' losses.
 
         Returns:
-            Tensor: Float32 losses [N], one per prediction. Computed directly from logits for numerical stability.
+            Tensor: FP32 BCE losses with the same shape as logits. Trainer masks non-solver positions,
+            averages within each trajectory, then averages trajectories across the optimizer update.
         """
+        if logits.ndim == 2:
+            labels = labels[:, None].expand_as(logits)
+            oracle = oracle[:, None]
         losses = F.binary_cross_entropy_with_logits(logits.float(), labels.float(), reduction="none")
         weight = torch.where(oracle, self.settings.oracle_weight, 1.0)
         return weight * losses

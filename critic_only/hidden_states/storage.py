@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets import Dataset, DatasetDict
 
+from critic_only.data.storage import CriticInputStorage
 from critic_only.constants import CPU_ATTENTION, DEFAULT_ATTENTION, FEATURE_SUBDIRECTORY
 from discovery_execution.processing.constants import MANIFEST_FILENAME
 from discovery_execution.processing.storage import file_digest, load_parquet_splits, read_manifest, write_json_atomic, write_parquet_atomic
@@ -42,7 +43,7 @@ class HiddenStateStorage:
             None. Stores the token-cache identity, precision, attention, and pooling settings; rejects incompatible restarts.
         """
         path = self.directory / MANIFEST_FILENAME
-        manifest = read_manifest(self.directory)
+        manifest = CriticInputStorage(self.directory).load_metadata()
         tokens = manifest["tokenization"]
         if not tokens["complete"]:
             raise ValueError("setup has not completed tokenization")
@@ -120,7 +121,7 @@ class HiddenStateStorage:
         table = pq.read_table(path)
         if (table.schema.metadata or {}).get(b"signature") != signature.encode() or table.num_rows != len(inputs):
             raise ValueError(f"feature shard configuration differs: {path}")
-        metadata = ["prefix_id", "problem_key", "input_hash", "privileged_input_hash", "labels", "oracle", "remaining_blocks", "branches"]
+        metadata = ["prefix_id", "problem_key", "input_hash", "privileged_input_hash", "labels", "oracle", "remaining_blocks", "branch"]
         for row, source in zip(table.to_pylist(), inputs.select_columns(metadata).to_list()):
             for key in metadata:
                 if row[key] != source[key]:

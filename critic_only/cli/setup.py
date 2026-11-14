@@ -15,7 +15,7 @@ from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
 from discovery_execution.audit.constants import GRADING_RULE
-from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, CONTINUATION_SEEDS
+from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, TRAJECTORY_SEEDS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.critic_input_processor import CriticInputProcessor
 from critic_only.data.tokenizer import PrefixTokenizer
@@ -103,13 +103,13 @@ def tokenization_settings(args: argparse.Namespace) -> dict[str, Any]:
     return {"model": model, "revision": revision, "hidden_size": config.hidden_size,
             "horizon": args.horizon, "max_length": args.max_length,
             "target": CRITIC_TARGET, "grading_rule": GRADING_RULE,
-            "prefix_blocks": INPUT_PREFIX_BLOCKS, "continuation_seeds": list(CONTINUATION_SEEDS),
+            "prefix_blocks": INPUT_PREFIX_BLOCKS, "trajectory_seeds": list(TRAJECTORY_SEEDS),
             "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
 
 def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
-    """Group continuations at 1×, tokenize both reference versions, and save them locally.
+    """Pair individual 1× histories with final outcomes, tokenize both views and save them locally.
 
     Args:
         directory: Completed shared trajectory collection.
@@ -125,8 +125,7 @@ def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
         examples = Dataset.from_generator(processor.iter_inputs, cache_dir=temporary)
         if not len(examples):
             raise ValueError("no eligible nonterminal critic inputs")
-        branch_counts = [len(branches) for branches in examples["branches"]]
-        print(f"Prepared {len(examples)} shared states; continuations per state: {min(branch_counts)}–{max(branch_counts)}", flush=True)
+        print(f"Prepared {len(examples)} individual 1× trajectories", flush=True)
         encoded = examples.map(formatter.encode, fn_kwargs={"settings": settings},
                                remove_columns=examples.column_names, load_from_cache_file=False)
         CriticInputStorage(directory).save_inputs(encoded, tokenizer, settings)
@@ -149,7 +148,7 @@ def main() -> None:
     if args.outputs_repo:
         source, revision = download_outputs(args.outputs_repo, args.revision, args.solver_model)
     processor = TrajectoryProcessor(source, args.destination / args.solver_model, args.solver_model, splits)
-    processor.compile_trajectories(revision, CONTINUATION_SEEDS)
+    processor.compile_trajectories(revision, TRAJECTORY_SEEDS)
     prepare_critic_inputs(processor.destination, settings)
     print(f"Saved trajectories and critic inputs: {processor.destination}", flush=True)
 

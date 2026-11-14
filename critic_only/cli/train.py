@@ -1,6 +1,6 @@
 """Train a critic using cached Qwen vectors, LoRA, or full tuning of selected final blocks.
 
-Use only reference-containing inputs and their success-fraction targets. Evaluate on unaided validation trajectories, save resumable checkpoints, and keep the best validation model. The test split is not loaded.
+Use only reference-containing inputs and their final-outcome targets. Evaluate on unaided validation trajectories, save resumable checkpoints, and keep the best validation model. The test split is not loaded.
 """
 
 import argparse

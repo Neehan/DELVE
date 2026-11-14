@@ -14,7 +14,7 @@ class DECritic(BaseCritic):
 
     The heads predict s, the probability a strategy is already discovered; alpha, the probability of discovering one per future block; and epsilon_r, success given a strategy and r remaining blocks. Unaided success is s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_(r-j+1). Oracle histories use epsilon_r alone. These components are learned from final correctness labels, not explicit strategy labels. Epsilon may decrease because later revisions can spoil an answer.
 
-    predict implements this mixture in log space; BaseCritic supplies the MLP, forward pass, loss, and checkpoints.
+    predict implements this mixture in log space at the observed endpoint only. Token-level Monte Carlo supervision is confined to PPO variants; BaseCritic supplies the MLP, forward pass, loss and checkpoints.
     """
 
     def __init__(self, settings: CriticConfig) -> None:

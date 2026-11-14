@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizerBase
 class CriticBatcher:
     """Batch tokens for LoRA or cached vectors for frozen training.
 
-    Each row supplies one reference-containing input and one success-fraction label. __call__ pads token sequences or stacks cached vectors and rejects missing references.
+    Each row supplies one reference-containing input and one binary final-outcome label. __call__ pads token sequences or stacks cached vectors and rejects missing references.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase | None) -> None:
@@ -45,6 +45,11 @@ class CriticBatcher:
         else:
             padded = self.tokenizer.pad([{"input_ids": view} for view in views], padding=True, return_tensors="pt")
             inputs = {name: value for name, value in padded.items() if name in {"input_ids", "attention_mask"}}
+            masks = [row["privileged_solver_mask"] for row in rows]
+            if any(len(mask) != len(view) or not any(mask) or not mask[-1] for mask, view in zip(masks, views)):
+                raise ValueError("solver mask must align with tokens and end at a supervised solver token")
+            inputs["solver_mask"] = torch.tensor([mask + [False] * (inputs["input_ids"].shape[1] - len(mask))
+                                                  for mask in masks], dtype=torch.bool)
         return {"labels": torch.tensor([row["labels"] for row in rows], dtype=torch.float32), "inputs": inputs,
                 "oracle": torch.tensor([row["oracle"] for row in rows], dtype=torch.bool),
                 "remaining_blocks": torch.tensor([row["remaining_blocks"] for row in rows], dtype=torch.long)}

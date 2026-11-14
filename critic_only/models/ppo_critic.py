@@ -11,8 +11,10 @@ from critic_only.models.models import CriticConfig
 class PPOCritic(BaseCritic):
     """Learn final success probability with one linear head after the shared MLP.
 
-    predict implements the direct head; BaseCritic supplies forward, loss, and checkpoints. The training CLI selects unaided trajectories for this variant. PPOOracleCritic reuses the architecture with additional oracle trajectories.
+    The same head is applied independently to each final-layer token state in live training. Cached-feature training predicts only the endpoint. The training CLI selects unaided trajectories; PPOOracleCritic also trains on oracle histories.
     """
+
+    token_supervision = True
 
     def __init__(self, settings: CriticConfig) -> None:
         """Add a linear success head after the shared MLP.
@@ -30,11 +32,11 @@ class PPOCritic(BaseCritic):
         """Predict final correctness directly from each encoded history.
 
         Args:
-            hidden: MLP outputs [N, hidden_size]. N is the number of input prefixes.
-            oracle: Solver-sketch flags [N]; unused here because the sketch is already in the encoded history. Kept for the common critic interface.
-            remaining_blocks: Future budgets [N]; unused here because the prompt already contains the budget. DE uses this argument explicitly.
+            hidden: MLP outputs [B,hidden_size] or [B,L,hidden_size], with no mixing across token positions.
+            oracle: Solver-sketch flags [B]; unused here because the sketch is already in the encoded history. Kept for the common critic interface.
+            remaining_blocks: Endpoint budgets [B]; unused here because the prompt already contains the budget. DE uses this argument explicitly.
 
         Returns:
-            Tensor: Float32 logits [N]. Apply sigmoid for probabilities, but not before computing the loss.
+            Tensor: Float32 logits [B] or [B,L]. Apply sigmoid for probabilities, not before computing BCE.
         """
         return self.prediction_head(hidden).float().squeeze(-1)

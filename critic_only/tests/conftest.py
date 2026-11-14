@@ -41,7 +41,7 @@ def tokenizer() -> PreTrainedTokenizerFast:
 @pytest.fixture
 def encoding_settings() -> dict[str, Any]:
     """Freeze prompt text and the token limit exactly as setup records them."""
-    return {"max_length": 512, "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
+    return {"horizon": 3, "max_length": 512, "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
 
@@ -102,10 +102,17 @@ def prepared_inputs(tmp_path: Path) -> CollectionFixture:
         common = {"competition": "aime", "year": year, "model": "tiny", "problem_id": problem["problem_id"],
                   "backend": {"temperature": 0.8, "top_p": 0.95, "top_k": 20}, "compute_multiplier_k": 3}
         messages = [{"role": "user", "content": "Find the number."}, {"role": "assistant", "content": "Thinking"}]
-        source = model_root / "unaided-3x" / problem["problem_id"] / "seed_0"
-        write_run(source, {**common, "experiment": "unaided", "seed": 0},
-                  [messages, messages + [{"role": "assistant", "content": "Parent later reasoning"}],
-                   messages + [{"role": "assistant", "content": "Parent later reasoning FINAL FUTURE"}]], [1, 1, 0])
+        for condition in ("unaided", "oracle-execution"):
+            for seed in range(8):
+                directory = model_root / f"{condition}-3x" / problem["problem_id"] / f"seed_{seed}"
+                metadata = {**common, "experiment": condition, "seed": seed, "inject_sketch_at": 0, "solution_index": 0}
+                history = [{"role": "user", "content": "Find the number."}]
+                if condition == "oracle-execution":
+                    history.append({"role": "user", "content": "Use symmetry."})
+                history.append({"role": "assistant", "content": f"Thinking seed {seed}"})
+                write_run(directory, metadata, [history,
+                    history + [{"role": "assistant", "content": "Parent later reasoning"}],
+                    history + [{"role": "assistant", "content": "Parent later reasoning FINAL FUTURE"}]], [1, 1, seed % 2])
         for condition in ("continue", "continue-oracle"):
             for seed in range(8):
                 branch = model_root / f"{condition}-at-1x" / problem["problem_id"] / "seed_0" / f"branch_{seed}"
@@ -123,36 +130,24 @@ def prepared_inputs(tmp_path: Path) -> CollectionFixture:
 
 
 @pytest.fixture
-def replace_saved_text() -> Callable[[Path, str, str], None]:
-    """Update test checkpoint text and its conversation copy without invalidating boundary offsets."""
-    def replace(directory: Path, old: str, new: str) -> None:
-        """Replace text in fixture messages; the edited instruction precedes the final assistant message."""
-        for path in directory.glob("*.zst"):
-            data = json.loads(zstandard.decompress(path.read_bytes()))
-            for message in data["messages"]:
-                message["content"] = message["content"].replace(old, new)
-            path.write_bytes(zstandard.compress(json.dumps(data).encode()))
-    return replace
-
-
-@pytest.fixture
 def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": 0.5,
-             "branches": [{"seed": 0, "final_correctness": 0, "path": "branch0"},
-                          {"seed": 1, "final_correctness": 1, "path": "branch1"}]},
+             "oracle": False, "remaining_blocks": 2, "labels": 0.,
+             "solver_mask": [False, True, True], "privileged_solver_mask": [False, False, True, True, True],
+             "branch": {"seed": 0, "final_correctness": 0, "path": "branch0"}},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
              "oracle": False, "remaining_blocks": 1, "labels": 1.,
-             "branches": [{"seed": 0, "final_correctness": 1, "path": "branch0"}]}]
+             "solver_mask": [False, True], "privileged_solver_mask": None,
+             "branch": {"seed": 0, "final_correctness": 1, "path": "branch0"}}]
 
 
 @pytest.fixture
 def reference_token_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Supply every pilot training row with a reference while retaining both cached views."""
-    return [{**row, "privileged_input_ids": [2, 3, 3, 2], "length": 4} for row in token_rows]
+    return [{**row, "privileged_input_ids": [2, 3, 3, 2], "privileged_solver_mask": [False, True, True, True], "length": 4} for row in token_rows]
 
 
 @pytest.fixture
@@ -160,5 +155,5 @@ def training_rows(reference_token_rows: list[dict[str, Any]]) -> list[dict[str, 
     """Use distinct ordinary and reference vectors to verify reference-only training."""
     return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
              "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
-             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branches": row["branches"]}
+             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branch": row["branch"]}
             for index, row in enumerate(reference_token_rows)]
