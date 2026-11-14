@@ -6,18 +6,34 @@ from typing import Any, cast
 
 import pytest
 import torch
-from transformers import PreTrainedTokenizerFast
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+from transformers import AutoModel, PreTrainedTokenizerFast
 
 from critic_only.data.solver_tokens import conversation_spans, solver_token_mask
+from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.data.storage import CriticInputStorage
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
+from critic_only.hidden_states.encoder import HiddenStateEncoder
 from critic_only.tests.test_data import compile_fixture
 from critic_only.tests.test_trainer import make_trainer
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import write_json_atomic
+
+
+@pytest.fixture
+def byte_tokenizer(tokenizer: PreTrainedTokenizerFast) -> PreTrainedTokenizerFast:
+    """Exercise byte-level Unicode and whitespace offsets without downloading a tokenizer during tests."""
+    backend = Tokenizer(models.BPE())
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.train_from_iterator(["assistant:\n\nαβ", "user:\nproblem", "answer\\boxed{2}\n", " reference "],
+        trainers.BpeTrainer(vocab_size=300, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+                            special_tokens=["[PAD]", "<|im_start|>", "<|im_end|>"]))
+    return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", padding_side="right",
+        additional_special_tokens=["<|im_start|>", "<|im_end|>"], chat_template=tokenizer.chat_template)
 
 
 def test_masks_exclude_reference_hint_and_delimiters() -> None:
@@ -32,6 +48,46 @@ def test_masks_exclude_reference_hint_and_delimiters() -> None:
     assert not any(mask[:rendered.index(conversation)])
     with pytest.raises(ValueError, match="exactly once"):
         solver_token_mask(rendered + conversation, conversation, spans, offsets)
+
+
+@pytest.mark.parametrize("ending", [[], [{"role": "user", "content": "Revise"}],
+    [{"role": "assistant", "content": ""}], [{"role": "assistant", "content": " \n\t"}]])
+def test_history_requires_nonempty_solver_endpoint(ending: list[dict[str, str]]) -> None:
+    """An empty or non-solver endpoint must not silently select an earlier assistant's hidden state."""
+    history = [{"role": "assistant", "content": "Earlier reasoning"}] + ending if ending else []
+    with pytest.raises(ValueError, match="end"):
+        conversation_spans(history)
+
+
+def test_token_crossing_boundary_is_excluded() -> None:
+    """Offset spans exclude merged delimiter/content tokens and zero-length special-token offsets."""
+    conversation, spans = conversation_spans([{"role": "assistant", "content": "αβ"}])
+    start, end = spans[0]
+    offsets = [(0, 0), (start - 1, start + 1), (start + 1, end), (end, end + 1)]
+    assert solver_token_mask(conversation + "!", conversation, spans, offsets) == [False, False, True, False]
+    with pytest.raises(ValueError, match="tokens"):
+        solver_token_mask(conversation, conversation, spans, [(0, 0), (start - 1, end)])
+    conversation, spans = conversation_spans([{"role": "assistant", "content": "earlier"},
+                                             {"role": "assistant", "content": "β"}])
+    with pytest.raises(ValueError, match="final solver"):
+        solver_token_mask(conversation, conversation, spans, [spans[0], (spans[1][0] - 1, spans[1][1])])
+
+
+@pytest.mark.parametrize("content", ["αβ → ² 😀", "<think>reasoning without closing tag", r"unfinished \\boxed{",
+    "answer\n\n", "a", "assistant:\nnot a role change"])
+def test_byte_tokenization_preserves_endpoint(content: str, byte_tokenizer: PreTrainedTokenizerFast) -> None:
+    """Unicode, reasoning markers and unfinished boxes survive tokenization through the exact final solver token."""
+    conversation, spans = conversation_spans([{"role": "user", "content": "problem"},
+                                             {"role": "assistant", "content": content}])
+    messages = [{"role": "system", "content": "Reference: " + content}, {"role": "user", "content": conversation}]
+    formatter = PrefixTokenizer(byte_tokenizer)
+    ids, mask = formatter._encode_messages(messages, spans, 1000, "example")
+    assert cast(str, byte_tokenizer.decode(ids)).endswith(content)
+    assert byte_tokenizer.decode([token for token, included in zip(ids, mask) if included]) == content
+    assert mask[-1] and len(mask) == len(ids)
+    assert formatter._encode_messages(messages, spans, len(ids), "example") == (ids, mask)
+    with pytest.raises(ValueError, match="truncation"):
+        formatter._encode_messages(messages, spans, len(ids) - 1, "example")
 
 
 def test_reference_prompt_and_causal_metadata(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast,
@@ -113,3 +169,64 @@ def test_loss_masks_and_endpoint_selection(critic_settings: Callable[[str], Crit
     assert logits.grad is not None
     assert logits.grad[~batch["inputs"]["solver_mask"]].count_nonzero() == 0
     assert logits.grad[batch["inputs"]["solver_mask"]].count_nonzero() == 4
+
+
+@pytest.mark.parametrize("mask", [[], [False] * 4, [True], [True, True, True, False]])
+def test_invalid_supervision_masks_rejected(mask: list[bool], tokenizer: PreTrainedTokenizerFast,
+    reference_token_rows: list[dict[str, Any]]) -> None:
+    """Reject masks with no targets, wrong length or an unsupervised terminal position before training."""
+    row = {**reference_token_rows[0], "privileged_solver_mask": mask}
+    with pytest.raises(ValueError, match="solver mask"):
+        CriticBatcher(tokenizer)([row])
+
+
+@pytest.mark.parametrize("mode", ["lora", "full"])
+def test_padding_cannot_change_values_or_gradients(mode: str, critic_settings: Callable[[str], CriticConfig],
+    tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
+    """A one-token solver span in a padded batch has the same values and gradient as its unpadded forward."""
+    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": mode,
+        "trainable_layers": 1, "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+    model = create_critic(settings, True).eval()
+    rows = [{**reference_token_rows[0], "privileged_input_ids": [2, 3], "privileged_solver_mask": [False, True]},
+            reference_token_rows[1]]
+    batch = CriticBatcher(tokenizer)(rows)
+    single = CriticBatcher(tokenizer)(rows[:1])
+    values = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    expected = model(single["inputs"], single["oracle"], single["remaining_blocks"])
+    torch.testing.assert_close(values[:1, :2], expected)
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    for actual, target in zip(torch.autograd.grad(values[0, 1], parameters), torch.autograd.grad(expected[0, 1], parameters)):
+        torch.testing.assert_close(actual, target, atol=1e-6, rtol=1e-4)
+
+
+@pytest.mark.parametrize("mode", ["lora", "full"])
+def test_cached_and_live_endpoints_match(mode: str, critic_settings: Callable[[str], CriticConfig],
+    tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
+    """Fresh live token critics and the same head on cached last-solver vectors make identical endpoint predictions."""
+    settings = critic_settings("ppo-oracle-critic")
+    frozen = create_critic(settings, True).eval()
+    live = create_critic(settings.model_copy(update={"training_mode": mode, "trainable_layers": 1,
+        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None}), True).eval()
+    live.load_state_dict(frozen.state_dict(), strict=False)
+    rows = [reference_token_rows[0], {**reference_token_rows[1], "privileged_input_ids": [2, 3],
+                                    "privileged_solver_mask": [False, True]}]
+    batch = CriticBatcher(tokenizer)(rows)
+    encoder = HiddenStateEncoder(AutoModel.from_pretrained(settings.model))
+    with torch.no_grad():
+        vectors = encoder(batch["inputs"]["input_ids"], batch["inputs"]["attention_mask"])
+        expected = frozen(vectors, batch["oracle"], batch["remaining_blocks"])
+        token_logits = live(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+        positions = batch["inputs"]["attention_mask"].sum(-1) - 1
+    torch.testing.assert_close(token_logits.gather(-1, positions[:, None]).squeeze(-1), expected, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize("label", [0., 1.])
+def test_extreme_token_logits_stay_finite(label: float, critic_settings: Callable[[str], CriticConfig]) -> None:
+    """Correct and incorrect saturated predictions retain finite BCE and gradients, including zero oracle weight."""
+    model = create_critic(critic_settings("ppo-oracle-critic").model_copy(update={"oracle_weight": 0}), True)
+    logits = torch.tensor([[-1000., 1000.], [1000., -1000.]], requires_grad=True)
+    loss = model.loss(logits, torch.tensor([label, label]), torch.tensor([False, True]))
+    assert torch.isfinite(loss).all() and loss[1].count_nonzero() == 0
+    loss.mean().backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+    assert logits.grad[1].count_nonzero() == 0

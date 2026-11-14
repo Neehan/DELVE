@@ -3,6 +3,8 @@
 
 def conversation_spans(messages: list[dict[str, str]]) -> tuple[str, list[tuple[int, int]]]:
     """Return quoted messages and character spans for assistant content; messages retain their saved order."""
+    if not messages or messages[-1]["role"] != "assistant" or not messages[-1]["content"].strip():
+        raise ValueError("critic history must end with a nonempty solver response")
     parts, spans = [], []
     position = 0
     for message in messages:
@@ -13,8 +15,6 @@ def conversation_spans(messages: list[dict[str, str]]) -> tuple[str, list[tuple[
             spans.append((start, start + len(message["content"])))
         parts.append(text)
         position += len(text)
-    if not spans:
-        raise ValueError("critic history contains no solver tokens")
     return "".join(parts), spans
 
 
@@ -31,6 +31,7 @@ def solver_token_mask(rendered: str, conversation: str, spans: list[tuple[int, i
         for index, (left, right) in enumerate(offsets):
             if origin + start <= left < right <= origin + end:
                 mask[index] = True
-    if not any(mask):
-        raise ValueError("solver content has no complete tokens to supervise")
+    final_start = origin + spans[-1][0]
+    if not any(mask[index] for index, (left, _) in enumerate(offsets) if left >= final_start):
+        raise ValueError("final solver response has no complete tokens to supervise")
     return mask

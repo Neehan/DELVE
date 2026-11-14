@@ -19,6 +19,9 @@ from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
 from discovery_execution.processing.problem_splits import ProblemSplits
+from discovery_execution.audit.answer_grader import AnswerGrader
+from discovery_execution.audit.constants import CRITIQUE_PROMPT_PATH
+from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 
 
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
@@ -199,4 +202,62 @@ def test_legacy_processed_audits_cannot_supply_labels(prepared_inputs: Collectio
 
     processor.dataset = processor.dataset.map(remove_rule)
     with pytest.raises(ValueError, match="regrade"):
+        list(processor.iter_inputs())
+
+
+@pytest.mark.parametrize("final_response,expected", [(r"Revision: \boxed{2}", 0),
+    (r"Revision: \boxed{1}", 1), (r"Still working: \boxed{", 1)])
+def test_verified_outcome_and_mid_response_boundary(prepared_inputs: CollectionFixture,
+    final_response: str, expected: int) -> None:
+    """The corrected grader supplies the final target, while first-block input excludes later text in the same message."""
+    root = next(path.parent for path in prepared_inputs.outputs_directory.rglob("meta.json")
+                if json.loads(path.read_text())["experiment"] == "unaided")
+    first = [{"role": "user", "content": "Find the number."},
+             {"role": "assistant", "content": r"At checkpoint: \boxed{1}"}]
+    later = [first[0], {"role": "assistant", "content": first[1]["content"] + " FUTURE APPENDED TEXT"},
+             {"role": "user", "content": CRITIQUE_PROMPT_PATH.read_text().strip()},
+             {"role": "assistant", "content": r"Critique only: \boxed{9}"}]
+    final = later + [{"role": "user", "content": "Revise your answer."},
+                     {"role": "assistant", "content": final_response}]
+    snapshots = [{"messages": history, "output_tokens": block * OUTPUT_TOKENS_PER_BLOCK}
+                 for block, history in enumerate((first, later, final), start=1)]
+    state_path = root / "conversation.json.zst"
+    state = json.loads(zstandard.decompress(state_path.read_bytes()))
+    state["messages"] = final
+    state["checkpoints"] = [{"output_tokens": snapshot["output_tokens"], "message_count": len(snapshot["messages"]),
+                             "last_message_chars": len(snapshot["messages"][-1]["content"])} for snapshot in snapshots]
+    state_path.write_bytes(zstandard.compress(json.dumps(state).encode()))
+    for block, snapshot in enumerate(snapshots, start=1):
+        (root / f"checkpoint_{block}x.json.zst").write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+    audit = AnswerGrader("1").grade_checkpoints(snapshots, prepared_inputs.horizon)
+    assert audit["checkpoints"]["2x"]["correctness"]["score"] == 1
+    (root / "audit.json").write_text(json.dumps(audit))
+    identity = str(root.relative_to(prepared_inputs.outputs_directory))
+    row = next(row for row in compile_fixture(prepared_inputs).iter_inputs() if row["branch"]["path"] == identity)
+    assert row["messages"] == first
+    assert row["branch"]["final_correctness"] == expected
+
+
+@pytest.mark.parametrize("damage", ["duplicate_boundary", "missing_boundary", "missing_request", "invalid_score"])
+def test_processed_trajectory_boundaries_rejected(prepared_inputs: CollectionFixture, damage: str) -> None:
+    """Corrupt checkpoint identities or non-binary labels cannot become a plausible training row."""
+    processor = compile_fixture(prepared_inputs)
+
+    def damage_root(row: dict[str, Any]) -> dict[str, str]:
+        """Change semantic fields after packaging to exercise the critic reader's own validation."""
+        if json.loads(row["metadata"])["experiment"] != "unaided":
+            return {"conversation": row["conversation"], "audit": row["audit"]}
+        state, audit = json.loads(row["conversation"]), json.loads(row["audit"])
+        if damage == "duplicate_boundary":
+            state["checkpoints"].append(state["checkpoints"][0])
+        elif damage == "missing_boundary":
+            state["checkpoints"] = state["checkpoints"][1:]
+        elif damage == "missing_request":
+            state["requests"] = state["requests"][1:]
+        else:
+            audit["checkpoints"]["3x"]["correctness"]["score"] = 0.5
+        return {"conversation": json.dumps(state), "audit": json.dumps(audit)}
+
+    processor.dataset = processor.dataset.map(damage_root)
+    with pytest.raises(ValueError):
         list(processor.iter_inputs())
