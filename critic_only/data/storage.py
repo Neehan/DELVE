@@ -7,7 +7,7 @@ from typing import Any, cast
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from critic_only.constants import CRITIC_SUBDIRECTORY, INPUT_CHUNK_ROWS, TOKENIZED_SUBDIRECTORY, TOKENIZER_SUBDIRECTORY
+from critic_only.constants import CRITIC_TARGET, CRITIC_SUBDIRECTORY, INPUT_CHUNK_ROWS, TOKENIZED_SUBDIRECTORY, TOKENIZER_SUBDIRECTORY
 from critic_only.data.tokenizer import token_digest
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLITS
 from discovery_execution.processing.storage import file_digest, load_parquet_splits, read_manifest, write_json_atomic, write_parquet_atomic
@@ -36,7 +36,10 @@ class CriticInputStorage:
         Returns:
             dict[str, Any]: Current model, input, and optional hidden-state metadata.
         """
-        return read_manifest(self.directory)
+        manifest = read_manifest(self.directory)
+        if manifest["tokenization"]["settings"].get("target") != CRITIC_TARGET:
+            raise ValueError("critic input objective changed; rerun setup into a new destination")
+        return manifest
 
     def save_inputs(self, encoded: Dataset, tokenizer: PreTrainedTokenizerBase, settings: dict[str, Any]) -> dict[str, str]:
         """Write token chunks by split, save the tokenizer, and record file hashes.

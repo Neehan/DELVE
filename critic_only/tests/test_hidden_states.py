@@ -17,6 +17,7 @@ import pytest
 import torch
 from transformers import AutoModel, DataCollatorWithPadding, PreTrainedTokenizerFast, Trainer, TrainingArguments
 
+from critic_only.constants import CRITIC_TARGET
 from critic_only.data.dataset_loader import load_critic_splits
 from critic_only.data.storage import CriticInputStorage
 from critic_only.hidden_states.encoder import HiddenStateEncoder
@@ -46,7 +47,7 @@ def save_token_chunks(root: Path, rows: list[dict[str, Any]], chunk_size: int) -
             path = root / split / "critic_only" / "tokenized" / f"part-{chunk:05d}.parquet"
             write_parquet_atomic(path, pa.Table.from_pylist(values[start:start + chunk_size]))
             checksums[str(path.relative_to(root))] = file_digest(path)
-    write_json_atomic(root / "manifest.json", {"tokenization": {"shards": checksums},
+    write_json_atomic(root / "manifest.json", {"tokenization": {"settings": {"target": CRITIC_TARGET}, "shards": checksums},
                       "features": {"signature": "signature", "complete": False}})
     return checksums
 
@@ -183,7 +184,7 @@ def test_distributed_hf_prediction_preserves_rows(critic_settings: Callable[[str
     tokenizer.save_pretrained(tmp_path / "critic_only" / "tokenizer")
     manifest = read_manifest(tmp_path)
     manifest.pop("features")
-    manifest["tokenization"].update(complete=True, settings={"model": model_path, "revision": "main", "hidden_size": 16})
+    manifest["tokenization"].update(complete=True, settings={"target": CRITIC_TARGET, "model": model_path, "revision": "main", "hidden_size": 16})
     write_json_atomic(tmp_path / "manifest.json", manifest)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))

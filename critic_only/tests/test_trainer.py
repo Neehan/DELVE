@@ -54,7 +54,7 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
 def test_training_resume(mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                          training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
-    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
+    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     training_rows = reference_token_rows if mode != "frozen" else training_rows
     full = make_trainer(tmp_path / "full", settings, tokenizer, training_rows, [])
@@ -121,12 +121,17 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
         selected = row[f"privileged_{column}"]
         if mode != "frozen":
             tokens = torch.tensor([selected])
-            inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens)}
+            inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens),
+                      "solver_mask": torch.tensor([row["privileged_solver_mask"]])}
         else:
             inputs = {"hidden_state": torch.tensor([selected])}
         prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
                            remaining_blocks=torch.tensor([row["remaining_blocks"]]))
-        expected_losses.append(model.loss(prediction, labels, torch.tensor([row["oracle"]])).squeeze(0))
+        losses = model.loss(prediction, labels, torch.tensor([row["oracle"]]))
+        if prediction.ndim == 2:
+            mask = inputs["solver_mask"]
+            losses = (losses * mask).sum(-1) / mask.sum(-1)
+        expected_losses.append(losses.squeeze(0))
     expected = torch.stack(expected_losses).mean()
     torch.testing.assert_close(actual, expected)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -140,7 +145,7 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
 def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Uneven microbatches must give each trajectory equal weight in an optimizer update."""
-    settings = critic_settings("de-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
+    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     rows = reference_token_rows if mode != "frozen" else training_rows
     dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": 1, "oracle": True}])

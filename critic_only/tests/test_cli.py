@@ -14,6 +14,7 @@ import pytest
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
+from critic_only.constants import CRITIC_TARGET
 from critic_only.cli import cache_hidden_states, evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
@@ -60,7 +61,7 @@ def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]
         path = root / split / "critic_only" / folder / "part-00000.parquet"
         write_parquet_atomic(path, pa.Table.from_pylist(values))
         checksums[str(path.relative_to(root))] = file_digest(path)
-    tokenization = {"settings": {"model": settings.model, "revision": settings.revision,
+    tokenization = {"settings": {"target": CRITIC_TARGET, "model": settings.model, "revision": settings.revision,
                                 "horizon": settings.horizon, "hidden_size": settings.input_size},
                     "complete": True, "shards": checksums if settings.training_mode != "frozen" else {}}
     write_json_atomic(root / "manifest.json", {"tokenization": tokenization,
@@ -97,7 +98,7 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
         "--destination", str(report), "--split", "test", "--cpu"])
     evaluate.main()
     predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
-    assert list(predictions["success_fraction"]) == [row["labels"] for row in training_rows]
+    assert list(predictions["final_correctness"]) == [row["labels"] for row in training_rows]
     assert "probability" in predictions.column_names
     assert "privileged_probability" not in predictions.column_names
     metrics = json.loads((report / "metrics.json").read_text())

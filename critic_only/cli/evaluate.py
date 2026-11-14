@@ -34,7 +34,7 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     """Save reference-conditioned probabilities and aggregate scores.
 
     Args:
-        result: Trainer predictions: one logit per prefix and its success-fraction target.
+        result: Trainer predictions: one logit per prefix and its final-outcome target.
         dataset: Evaluated examples in prediction order, including IDs, problem keys, and remaining budgets.
         args: CLI settings naming the checkpoint, evaluated split, and report destination.
 
@@ -51,7 +51,7 @@ def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.N
     Dataset.from_dict({"prefix_id": dataset["prefix_id"], "problem_key": keys,
                        "remaining_blocks": dataset["remaining_blocks"],
                        "probability": expit(logits).tolist(),
-                       "success_fraction": labels.tolist(), "branches": dataset["branches"]}).to_parquet(str(args.destination / "predictions.parquet"))
+                       "final_correctness": labels.tolist(), "branch": dataset["branch"]}).to_parquet(str(args.destination / "predictions.parquet"))
 
 
 def main() -> None:

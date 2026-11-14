@@ -77,6 +77,6 @@ class HiddenStateRunner:
         references = dict(zip(reference_indices, vectors[len(rows):]))
         records = []
         for index, row in enumerate(rows):
-            metadata = {key: value for key, value in row.items() if key not in {"input_ids", "privileged_input_ids", "length"}}
+            metadata = {key: value for key, value in row.items() if key not in {"input_ids", "privileged_input_ids", "solver_mask", "privileged_solver_mask", "length"}}
             records.append({**metadata, "hidden_state": vectors[index], "privileged_hidden_state": references.get(index)})
         return records

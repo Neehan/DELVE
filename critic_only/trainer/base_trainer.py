@@ -1,4 +1,4 @@
-"""Train reference-conditioned critics against continuation success fractions."""
+"""Train causal token values against each trajectory’s final outcome and evaluate its endpoint."""
 
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ from critic_only.models.base_critic import BaseCritic
 
 
 class BaseTrainer(Trainer):
-    """Add success-fraction loss, metric logging, and critic checkpoints to Hugging Face Trainer.
+    """Add per-trajectory Monte Carlo loss, endpoint evaluation, logging and checkpoints to Hugging Face Trainer.
 
     compute_loss defines our objective. Hugging Face handles batching, optimization, and resume; subclasses need no additional overrides.
     """
@@ -65,22 +65,31 @@ class BaseTrainer(Trainer):
     def compute_loss(
         self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any
     ) -> Any:
-        """Average BCE against each prefix's observed continuation success fraction.
+        """Train each solver-token prefix to predict its trajectory's final binary reward.
 
-        Each row supplies one reference-containing input and one target. Normalize over all prefixes in the optimizer update, including accumulated microbatches.
+        For token logits, average BCE only over solver positions within each row, then average rows. This
+        gives a short trajectory the same weight as a long one. Cached-vector and DE rows have one loss.
+        Labels stay [B], so Hugging Face counts trajectories, not tokens, across accumulated microbatches.
 
         Args:
-            model: Critic, possibly wrapped for distributed training.
-            inputs: Model inputs, success-fraction labels, solver-oracle flags, and remaining budgets for B rows.
+            model: Critic, possibly wrapped in DDP.
+            inputs: Tokens or vectors, scalar labels, oracle flags and budgets. Token inputs include solver_mask.
             *args: Hugging Face may pass return_outputs as the first positional argument.
-            **kwargs: return_outputs requests logits for evaluation. num_items_in_batch counts prefixes across accumulated batches, and across ranks when configured.
+            **kwargs: num_items_in_batch is the accumulated trajectory count; return_outputs requests evaluation logits.
 
         Returns:
-            Tensor: Mean loss, or (loss, {"logits": logits}) when evaluation outputs are requested.
+            Tensor: Normalized training loss, or (loss, {"logits": endpoint_logits}). eval_loss measures the
+            trajectory-averaged token loss; terminal_nll uses only endpoint predictions to select checkpoints.
         """
         logits = model(inputs=inputs["inputs"], oracle=inputs["oracle"], remaining_blocks=inputs["remaining_blocks"])
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
         losses = critic.loss(logits, inputs["labels"], inputs["oracle"])
+        if logits.ndim == 2:
+            mask = inputs["inputs"]["solver_mask"]
+            # Average positions within each trajectory before normalizing accumulated trajectory batches.
+            losses = (losses * mask).sum(dim=-1) / mask.sum(dim=-1)
+            positions = inputs["inputs"]["attention_mask"].sum(dim=-1) - 1
+            logits = logits.gather(-1, positions[:, None]).squeeze(-1)
         prefix_count = kwargs.get("num_items_in_batch")
         loss = losses.mean() if prefix_count is None else losses.sum() / prefix_count
         if prefix_count is not None and self.args.average_tokens_across_devices:

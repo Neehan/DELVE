@@ -1,4 +1,4 @@
-"""Score success probabilities against grouped continuation outcomes, weighting problems equally."""
+"""Score endpoint success probabilities against terminal outcomes, weighting problems equally."""
 
 from typing import Any
 
@@ -8,13 +8,13 @@ from transformers import EvalPrediction
 
 
 def outcome_scores(logits: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Score a prediction against the observed fraction of successful continuations.
+    """Return stable NLL and Brier for final-correctness predictions.
 
-    NLL and Brier equal the average scores against the individual binary outcomes. Brier includes the observed outcome variance, so it is not merely squared error against the fraction.
+    Binary labels give standard outcome scores. Fractional labels are also supported: the variance term makes Brier equal the mean score against the underlying binary outcomes.
 
     Args:
         logits: Predicted success logits [N].
-        labels: Observed success fractions [N], each in [0, 1].
+        labels: Final correctness targets [N], each in [0, 1].
 
     Returns:
         tuple[np.ndarray, np.ndarray]: Negative log-likelihood and Brier scores, each [N]; lower is better.
@@ -27,7 +27,7 @@ def compute_metrics(prediction: EvalPrediction, problem_keys: list[str]) -> dict
     """Report reference-conditioned validation metrics, averaging problems equally.
 
     Args:
-        prediction: Trainer outputs containing scalar logits and success-fraction labels.
+        prediction: Trainer outputs containing endpoint logits and final binary outcomes.
         problem_keys: Problem ID for each example in prediction order.
 
     Returns:
@@ -44,7 +44,7 @@ def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list
 
     Args:
         logits: Final-success logits [N].
-        labels: Observed success fractions [N], aligned with logits.
+        labels: Final correctness targets [N], aligned with logits.
         problem_keys: Problem IDs [N] in the same order.
 
     Returns:
@@ -54,7 +54,7 @@ def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list
         raise ValueError("evaluation problem identities, predictions, and labels must have equal lengths")
     if (logits.ndim != 1 or labels.shape != logits.shape or not np.isfinite(logits).all()
             or not np.isfinite(labels).all() or ((labels < 0) | (labels > 1)).any()):
-        raise ValueError("evaluation requires finite scalar logits and success fractions in [0, 1]")
+        raise ValueError("evaluation requires finite scalar logits and targets in [0, 1]")
     nll, brier = outcome_scores(logits, labels)
     value_mse = (expit(logits) - labels) ** 2
     problems = sorted(set(problem_keys))
