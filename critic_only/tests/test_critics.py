@@ -16,7 +16,7 @@ from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
 from critic_only.models.ppo_critic import PPOCritic
-from critic_only.models.loader import create_critic
+from critic_only.models.loader import create_critic, load_head_checkpoint
 from critic_only.models.models import CriticConfig
 
 
@@ -324,3 +324,49 @@ def test_grouped_loss_matches_individual_outcomes(successes: int, trials: int,
     np.testing.assert_allclose(brier, individual_brier.mean(), rtol=1e-6)
     report = evaluation_report(logits.detach().numpy(), label.numpy(), ["problem"])
     assert report["value_mse"] == pytest.approx((torch.sigmoid(logits).item() - successes / trials) ** 2)
+
+
+@pytest.mark.parametrize("mode", ["full", "lora"])
+def test_head_transfer_preserves_pretrained_qwen(mode: str, critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
+    """A trained token head transfers exactly, while Qwen stays frozen during warm-up and unchanged during transfer."""
+    source = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
+    head = create_critic(source, True)
+    assert head.language_model is not None
+    qwen_before = {name: parameter.detach().clone() for name, parameter in head.language_model.named_parameters()}
+    parameters = [parameter for parameter in head.parameters() if parameter.requires_grad]
+    optimizer = torch.optim.AdamW(parameters, lr=3e-4)
+    ids = torch.tensor([[2, 3, 4]])
+    inputs = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+    flags, budget = torch.tensor([False]), torch.tensor([2])
+    logits = head(inputs, flags, budget)
+    assert logits.shape == (1, 3)
+    head.loss(logits, torch.tensor([1.0]), flags).mean().backward()
+    optimizer.step()
+    for name, parameter in head.language_model.named_parameters():
+        assert parameter.grad is None and not parameter.requires_grad
+        torch.testing.assert_close(parameter, qwen_before[name], rtol=0, atol=0)
+    head.save(tmp_path / "head")
+    destination = source.model_copy(update={"training_mode": mode, "trainable_layers": 1,
+        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+    weights = load_head_checkpoint(destination, tmp_path / "head")
+    tuned = create_critic(destination, True)
+    assert tuned.language_model is not None
+    before_transfer = {name: parameter.detach().clone() for name, parameter in tuned.language_model.named_parameters()}
+    tuned.load_head_weights(weights)
+    for name, parameter in tuned.language_model.named_parameters():
+        torch.testing.assert_close(parameter, before_transfer[name], rtol=0, atol=0)
+    head.eval(); tuned.eval()
+    torch.testing.assert_close(head(inputs, flags, budget), tuned(inputs, flags, budget), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("field,value", [("data_signature", "other-inputs"), ("revision", "different-revision"),
+    ("hidden_size", 32), ("variant", "ppo-critic"), ("training_mode", "frozen")])
+def test_head_transfer_rejects_incompatible_source(field: str, value: Any,
+    critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
+    """Do not transfer a head with different inputs, architecture, revision or training objective."""
+    source = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
+    create_critic(source, True).save(tmp_path / "head")
+    (tmp_path / "head" / CONFIG_FILENAME).write_text(source.model_copy(update={field: value}).model_dump_json())
+    destination = source.model_copy(update={"training_mode": "full", "trainable_layers": 1})
+    with pytest.raises(ValueError, match="head"):
+        load_head_checkpoint(destination, tmp_path / "head")

@@ -53,6 +53,31 @@ class BaseCritic(nn.Module, ABC):
             raise ValueError("critic checkpoint configuration differs")
         weights = load_file(str(directory / MODEL_FILENAME))
         parameters = {name: parameter for name, parameter in self.named_parameters() if parameter.requires_grad}
+        self._copy_weights(weights, parameters)
+
+    def load_head_weights(self, weights: dict[str, Tensor]) -> None:
+        """Initialize the MLP/value head without changing Qwen or optimizer state.
+
+        Args:
+            weights: Compatible head-checkpoint tensors returned by load_head_checkpoint.
+
+        Returns:
+            None. Checks every tensor name and shape before copying any weights.
+        """
+        heads = {name: parameter for name, parameter in self.named_parameters()
+                 if not name.startswith("language_model.")}
+        self._copy_weights(weights, heads)
+
+    def _copy_weights(self, weights: dict[str, Tensor], parameters: dict[str, nn.Parameter]) -> None:
+        """Restore exact tensors atomically with respect to validation errors.
+
+        Args:
+            weights: Saved tensors to restore.
+            parameters: Exact destination parameter set; names and shapes must match.
+
+        Returns:
+            None. Copies weights only after all validation succeeds.
+        """
         if parameters.keys() != weights.keys():
             raise ValueError("critic checkpoint trainable parameter names differ")
         for name, parameter in parameters.items():

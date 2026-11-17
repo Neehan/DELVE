@@ -1,6 +1,6 @@
 """Evaluate a saved critic and write metrics.json and predictions.parquet.
 
-Use unaided prefixes from the requested split with reference solutions visible to the critic. Frozen mode reads vectors; LoRA and full modes read tokens and load Qwen.
+Use unaided prefixes from the requested split with reference solutions visible to the critic. Frozen mode reads cached vectors; head, LoRA and full modes read tokens and load Qwen.
 """
 
 import argparse
