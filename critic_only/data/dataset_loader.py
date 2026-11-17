@@ -38,7 +38,7 @@ def input_signature(manifest: dict[str, Any], training_mode: str) -> str:
 
     Args:
         manifest: Processed model metadata with a completed token or hidden-state section.
-        training_mode: frozen, lora, or full.
+        training_mode: frozen selects endpoint vectors; head, lora, and full select tokens.
 
     Returns:
         str: Hash of the selected input section. Adding an optional hidden-state cache does not change a token-based run's identity.
