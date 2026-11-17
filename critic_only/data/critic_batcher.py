@@ -7,16 +7,16 @@ from transformers import PreTrainedTokenizerBase
 
 
 class CriticBatcher:
-    """Batch tokens for LoRA or cached vectors for frozen training.
+    """Batch tokens for live Qwen modes or cached vectors for frozen training.
 
     Each row supplies one reference-containing input and one binary final-outcome label. __call__ pads token sequences or stacks cached vectors and rejects missing references.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase | None) -> None:
-        """Use a tokenizer to pad LoRA inputs, or None to stack cached vectors.
+        """Use a tokenizer to pad live Qwen inputs, or None to stack cached vectors.
 
         Args:
-            tokenizer: Right-padding tokenizer for LoRA, or None for cached vectors.
+            tokenizer: Right-padding tokenizer for live Qwen modes, or None for cached vectors.
 
         Returns:
             None. Stores the tokenizer used by __call__.

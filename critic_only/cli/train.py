@@ -5,6 +5,7 @@ Use only reference-containing inputs and their final-outcome targets. Evaluate o
 
 import argparse
 import json
+import math
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -73,9 +74,9 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("checkpoint-steps must be positive")
     if args.head_checkpoint is not None and args.training_mode not in ("full", "lora"):
         parser.error("head-checkpoint requires full or lora training")
-    if min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
-        parser.error("training sizes and learning rate must be positive")
-    if args.hidden_size <= 0 or args.oracle_weight < 0 or not 0 <= args.oracle_supervision_fraction <= 1:
+    if not math.isfinite(args.learning_rate) or min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
+        parser.error("training sizes and learning rate must be positive and finite")
+    if args.hidden_size <= 0 or not math.isfinite(args.oracle_weight) or args.oracle_weight < 0 or not 0 <= args.oracle_supervision_fraction <= 1:
         parser.error("invalid MLP size, oracle weight, or oracle-supervision-fraction")
     if not 0 < args.training_problem_fraction <= 1:
         parser.error("--training-problem-fraction must be in (0, 1]")

@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pyarrow as pa
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
@@ -241,6 +241,10 @@ def test_head_warmup_then_finetune_and_resume(mode: str, critic_settings: Callab
     assert actual.keys() == expected.keys()
     for name in expected:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+    head_weights["prediction_head.bias"] += 1
+    save_file(head_weights, str(head_run / "best" / "critic.safetensors"))
+    with pytest.raises(ValueError, match="saved training settings"):
+        train.main()
 
 
 @pytest.mark.parametrize("option", ["--trainable-layers", "--lora-rank", "--lora-alpha", "--head-checkpoint"])
@@ -267,3 +271,35 @@ def test_checkpoint_interval_fails_early(steps: str, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--checkpoint-steps", steps])
     with pytest.raises(SystemExit):
         train.parse_arguments()
+
+
+@pytest.mark.parametrize("option", ["--learning-rate", "--oracle-weight"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_nonfinite_training_values_fail_early(option: str, value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject non-finite optimization values before allocating Qwen or opening data shards."""
+    loader = Mock()
+    monkeypatch.setattr(train, "load_critic_splits", loader)
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", f"{option}={value}"])
+    with pytest.raises(SystemExit):
+        train.main()
+    loader.assert_not_called()
+
+
+def test_checkpoint_interval_longer_than_run(critic_settings: Callable[[str], CriticConfig],
+    reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short head run still evaluates its final update and saves a resumable best checkpoint."""
+    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
+    root, output = tmp_path / "data", tmp_path / "run"
+    save_features(root, settings, reference_token_rows)
+    tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
+    monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output),
+        "--variant", "ppo-oracle-critic", "--training-mode", "head", "--hidden-size", "16",
+        "--epochs", "1", "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "125", "--cpu"])
+    train.main()
+    state = json.loads((output / "trainer_state.json").read_text())
+    assert state["global_step"] == 2
+    assert [row["step"] for row in state["log_history"] if "eval_terminal_nll" in row] == [2]
+    assert Path(state["best_model_checkpoint"]).name == "checkpoint-2"
+    assert (output / "best" / "critic.safetensors").is_file()
+    assert (output / "checkpoint-2" / "optimizer.pt").is_file()
