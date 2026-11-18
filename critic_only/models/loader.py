@@ -1,14 +1,12 @@
 """Construct a cached-vector critic, a live frozen-Qwen head, or a full/LoRA critic."""
 
-from pathlib import Path
 from typing import cast
 
 import torch
 from peft import LoraConfig, get_peft_model
-from safetensors.torch import load_file
 from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION
+from critic_only.constants import CPU_ATTENTION, DEFAULT_ATTENTION
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
 from critic_only.models.models import CriticConfig
@@ -70,23 +68,3 @@ def adapter_config(settings: CriticConfig, first_trainable_layer: int) -> LoraCo
         excluded_modules = rf"(?:.*\.)?layers\.(?:{layer_indices})\..*"
     return LoraConfig(r=cast(int, settings.lora_rank), lora_alpha=cast(int, settings.lora_alpha),
                       target_modules="all-linear", exclude_modules=excluded_modules)
-
-
-def load_head_checkpoint(settings: CriticConfig, directory: Path) -> dict[str, torch.Tensor]:
-    """Read a compatible head-training checkpoint before loading Qwen.
-
-    Args:
-        settings: Destination full/LoRA configuration, including the exact token-cache identity.
-        directory: Completed head-training checkpoint; Qwen weights are never transferred.
-
-    Returns:
-        dict[str, Tensor]: MLP/value-head weights. Raises if inputs, architecture, or model revision differ.
-    """
-    source = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
-    if source.training_mode != "head" or settings.training_mode not in ("full", "lora"):
-        raise ValueError("head initialization requires a head checkpoint and full/LoRA destination")
-    expected = settings.model_copy(update={"training_mode": "head", "trainable_layers": None,
-                                           "lora_rank": None, "lora_alpha": None})
-    if source != expected:
-        raise ValueError("head checkpoint inputs or critic configuration differ")
-    return load_file(str(directory / MODEL_FILENAME))

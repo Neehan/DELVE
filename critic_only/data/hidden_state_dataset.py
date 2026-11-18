@@ -48,7 +48,7 @@ class HiddenStateDataset(TorchDataset):
             index: Zero-based position of a branch example in the selected dataset.
 
         Returns:
-            dict[str, Any]: Ordinary vector, optional reference vector, final-outcome label, oracle flag, and remaining blocks for CriticBatcher.
+            dict[str, Any]: Ordinary vector, optional reference vector, checkpoint labels, oracle flag, and remaining blocks for CriticBatcher.
         """
         return {"hidden_state": self.hidden_states[index], "privileged_hidden_state": self.privileged_hidden_states[index] if self.reference_available[index] else None,
                 "labels": self.labels[index], "oracle": self.oracle[index], "remaining_blocks": self.remaining_blocks[index]}

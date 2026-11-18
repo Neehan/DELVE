@@ -1,6 +1,6 @@
 """Build critic prompts and save their token IDs, with and without a reference solution.
 
-The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s final binary label, kept outside the prompt.
+The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s exact future checkpoint labels, kept outside the prompt.
 """
 
 import hashlib
@@ -29,12 +29,14 @@ class PrefixTokenizer:
         self.tokenizer = tokenizer
 
     def encode(self, row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        """Return token IDs/masks for both reference views and this trajectory's separate final binary label.
+        """Return token IDs/masks for both reference views and this trajectory's separate checkpoint labels.
 
         row is a serialized InputPrefix. settings pins prompts, total horizon and maximum length. Only the
         total budget is placed before the history; endpoint phase/completion information would leak backward.
         """
         record = InputPrefix.model_validate(dict(row))
+        if len(record.branch.checkpoint_correctness) != settings["horizon"] - 1 or record.remaining_blocks != settings["horizon"] - 1:
+            raise ValueError(f"checkpoint labels do not match the 1× input budget: {record.prefix_id}")
         conversation, spans = conversation_spans(record.messages)
         system = settings["critic_prompt"].format(block_tokens=OUTPUT_TOKENS_PER_BLOCK, horizon=settings["horizon"])
         messages = [{"role": "system", "content": system}, {"role": "user", "content": conversation}]
@@ -50,7 +52,7 @@ class PrefixTokenizer:
                 "solver_mask": mask, "privileged_solver_mask": privileged_mask,
                 "input_hash": token_digest(token_ids),
                 "privileged_input_hash": token_digest(privileged_ids) if privileged_ids is not None else None,
-                "split": record.split, "labels": record.branch.final_correctness, "branch": record.branch.model_dump(),
+                "split": record.split, "labels": record.branch.checkpoint_correctness, "branch": record.branch.model_dump(),
                 "remaining_blocks": record.remaining_blocks,
                 "length": len(privileged_ids) if privileged_ids is not None else len(token_ids),
                 "prefix_id": record.prefix_id, "problem_key": record.problem_key, "oracle": record.oracle}

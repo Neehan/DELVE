@@ -1,9 +1,10 @@
-"""Train causal token values against each trajectory’s final outcome and evaluate its endpoint."""
+"""Train future checkpoint curves at every solver token and evaluate at the 1× endpoint."""
 
 import json
 from pathlib import Path
 from typing import Any, cast
 
+import torch
 from torch import nn
 from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
@@ -65,32 +66,32 @@ class BaseTrainer(Trainer):
     def compute_loss(
         self, model: nn.Module, inputs: dict[str, Any], *args: Any, **kwargs: Any
     ) -> Any:
-        """Train each solver-token prefix to predict its trajectory's final binary reward.
-
-        For token logits, average BCE only over solver positions within each row, then average rows. This
-        gives a short trajectory the same weight as a long one. Cached-vector and DE rows have one loss.
-        Labels stay [B], so Hugging Face counts trajectories, not tokens, across accumulated microbatches.
+        """Fit the exact future-checkpoint curve at every solver token, weighting trajectories equally.
 
         Args:
             model: Critic, possibly wrapped in DDP.
-            inputs: Tokens or vectors, scalar labels, oracle flags and budgets. Token inputs include solver_mask.
+            inputs: Tokens or endpoint vectors, checkpoint labels [B,H-1], oracle flags and aligned budgets.
             *args: Hugging Face may pass return_outputs as the first positional argument.
-            **kwargs: num_items_in_batch is the accumulated trajectory count; return_outputs requests evaluation logits.
+            **kwargs: num_items_in_batch counts all checkpoint labels across the accumulated batch;
+                return_outputs requests endpoint curves for evaluation.
 
         Returns:
-            Tensor: Normalized training loss, or (loss, {"logits": endpoint_logits}). eval_loss measures the
-            trajectory-averaged token loss; terminal_nll uses only endpoint predictions to select checkpoints.
+            Tensor: BCE averaged over horizons and solver tokens, then trajectories. With return_outputs,
+            also returns endpoint logits [B,H-1]. Best-checkpoint selection still uses final-deadline NLL.
         """
         logits = model(inputs=inputs["inputs"], oracle=inputs["oracle"], remaining_blocks=inputs["remaining_blocks"])
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
         losses = critic.loss(logits, inputs["labels"], inputs["oracle"])
-        if logits.ndim == 2:
+        losses = losses.mean(dim=-1)
+        if logits.ndim == 3:
             mask = inputs["inputs"]["solver_mask"]
-            # Average positions within each trajectory before normalizing accumulated trajectory batches.
+            # Equal weight per horizon and per trajectory, independent of the number of solver tokens.
             losses = (losses * mask).sum(dim=-1) / mask.sum(dim=-1)
             positions = inputs["inputs"]["attention_mask"].sum(dim=-1) - 1
-            logits = logits.gather(-1, positions[:, None]).squeeze(-1)
-        prefix_count = kwargs.get("num_items_in_batch")
+            logits = logits[torch.arange(len(positions), device=positions.device), positions]
+        label_count = kwargs.get("num_items_in_batch")
+        # HF counts every entry of [B,H-1]; convert its accumulated label count to a trajectory count.
+        prefix_count = None if label_count is None else label_count / inputs["labels"].shape[-1]
         loss = losses.mean() if prefix_count is None else losses.sum() / prefix_count
         if prefix_count is not None and self.args.average_tokens_across_devices:
             # DDP averages rank gradients; undo that average when dividing by the global prefix count.

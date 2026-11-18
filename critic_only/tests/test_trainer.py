@@ -126,9 +126,10 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
         else:
             inputs = {"hidden_state": torch.tensor([selected])}
         prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
-                           remaining_blocks=torch.tensor([row["remaining_blocks"]]))
+                           remaining_blocks=batcher([row])["remaining_blocks"])
         losses = model.loss(prediction, labels, torch.tensor([row["oracle"]]))
-        if prediction.ndim == 2:
+        losses = losses.mean(dim=-1)
+        if prediction.ndim == 3:
             mask = inputs["solver_mask"]
             losses = (losses * mask).sum(-1) / mask.sum(-1)
         expected_losses.append(losses.squeeze(0))
@@ -138,17 +139,18 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
     for actual_gradient, expected_gradient in zip(torch.autograd.grad(actual, parameters), torch.autograd.grad(expected, parameters)):
         torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-6, rtol=1e-4)
     assert set(outputs) == {"logits"}
-    assert outputs["logits"].shape == (len(rows),)
+    assert outputs["logits"].shape == (len(rows), settings.horizon - 1)
 
 
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("mode", ["frozen", "lora", "full"])
-def test_accumulation_matches_full_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
+def test_accumulation_matches_full_batch(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Uneven microbatches must give each trajectory equal weight in an optimizer update."""
-    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "frozen" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     rows = reference_token_rows if mode != "frozen" else training_rows
-    dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": 1, "oracle": True}])
+    dataset = Dataset.from_list([rows[0], rows[1], {**rows[0], "labels": [0., 1.], "oracle": True}])
     updates = []
     for batch_size, accumulation in ((3, 1), (2, 2), (1, 3)):
         set_seed(17)

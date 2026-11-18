@@ -1,4 +1,4 @@
-"""Pair each root trajectory’s first block with its own verified final outcome."""
+"""Pair each root trajectory’s first block with exact grades at every future checkpoint."""
 
 import hashlib
 import json
@@ -84,7 +84,7 @@ def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
 
 
 class CriticInputProcessor:
-    """Yield one observed 1× history and binary final label per root trajectory.
+    """Yield one observed 1× history and future binary labels per root trajectory.
 
     iter_inputs checks identities, saved hints and audits. References follow the saved solution selection or seed round robin.
     """
@@ -158,7 +158,7 @@ class CriticInputProcessor:
         return self.problems[key]
 
     def _build_input(self, path: Path, metadata: dict[str, Any]) -> InputPrefix:
-        """Return the exact first-block history, matching reference and final binary grade for path/metadata."""
+        """Return the exact first-block history, matching reference and future checkpoint grades for path/metadata."""
         oracle = metadata["experiment"] == "oracle-execution"
         outcome = self._read_branch_outcome(path, metadata)
         snapshot = self._read_input_checkpoint(path, oracle)
@@ -205,14 +205,14 @@ class CriticInputProcessor:
         return snapshot
 
     def _read_branch_outcome(self, path: Path, metadata: dict[str, Any]) -> BranchOutcome:
-        """Read the final answer grade, rejecting incomplete or inconsistent audits.
+        """Read exact checkpoint grades, rejecting incomplete or inconsistent audits.
 
         Args:
-            path: Saved trajectory ID whose audit supplies the final label.
+            path: Saved trajectory ID whose audit supplies exact checkpoint labels.
             metadata: Run metadata providing the trajectory seed.
 
         Returns:
-            BranchOutcome: Branch seed, trajectory ID, and correctness of the last answer at the configured final horizon.
+            BranchOutcome: Branch seed, trajectory ID, and correctness at each checkpoint after the input boundary.
         """
         audit = self._read_json(path / AUDIT_FILENAME)
         validate_grading_rule(audit, str(path))
@@ -222,5 +222,6 @@ class CriticInputProcessor:
         if set(audit["checkpoints"]) != set(expected):
             raise ValueError(f"missing or unexpected audit checkpoints: {path}")
         return BranchOutcome(seed=metadata["seed"],
-                             final_correctness=audit["checkpoints"][expected[-1]]["correctness"]["score"],
+                             checkpoint_correctness=[audit["checkpoints"][key]["correctness"]["score"]
+                                                     for key in expected[INPUT_PREFIX_BLOCKS:]],
                              path=str(path))

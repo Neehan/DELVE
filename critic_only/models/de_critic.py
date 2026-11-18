@@ -1,4 +1,4 @@
-"""Predict final answer correctness by combining strategy discovery and execution probabilities."""
+"""Predict exact checkpoint correctness through shared discovery and execution components."""
 
 import torch
 from torch import Tensor, nn
@@ -10,66 +10,61 @@ from critic_only.models.models import CriticConfig
 
 
 class DECritic(BaseCritic):
-    """Estimate success by separating strategy discovery from strategy execution.
+    """Couple future-checkpoint values through a block-based discovery–execution model.
 
-    The heads predict s, the probability a strategy is already discovered; alpha, the probability of discovering one per future block; and epsilon_r, success given a strategy and r remaining blocks. Unaided success is s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_(r-j+1). Oracle histories use epsilon_r alone. These components are learned from final correctness labels, not explicit strategy labels. Epsilon may decrease because later revisions can spoil an answer.
-
-    predict implements this mixture in log space at the observed endpoint only. Token-level Monte Carlo supervision is confined to PPO variants; BaseCritic supplies the MLP, forward pass, loss and checkpoints.
+    predict estimates strategy-discovered probability s, discovery rate alpha, and execution probabilities
+    epsilon_1 through epsilon_H from each token. At remaining budget r, unaided success is
+    s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_(r-j+1).
+    Oracle histories use epsilon_r. Execution can decrease with budget because revisions may spoil answers.
+    BaseCritic handles Qwen, the shared MLP, curve loss and checkpoints for every variant.
     """
 
     def __init__(self, settings: CriticConfig) -> None:
-        """Add heads for strategy discovery and execution to the shared MLP.
+        """Create discovery heads and one execution logit per whole-block remaining budget.
 
         Args:
-            settings: hidden_size sets head input width; horizon - 1 sets the number of future execution budgets.
+            settings: MLP width and total solver horizon. Interior first-block tokens need budgets up to H.
 
         Returns:
             None.
         """
         super().__init__(settings)
-        self.horizons = settings.horizon - 1
         self.strategy_discovered = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
         self.discovery = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
-        self.execution = nn.Linear(settings.hidden_size, self.horizons, dtype=torch.float32)
+        self.execution = nn.Linear(settings.hidden_size, settings.horizon, dtype=torch.float32)
 
     def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Combine discovery and execution probabilities into one final-success logit.
-
-        Unaided rows use the mixture defined in the class docstring. Oracle rows use epsilon_r alone. Log-space calculation avoids underflow in small probabilities.
+        """Compute all absolute checkpoint logits using the same DE parameters at each token.
 
         Args:
-            hidden: MLP outputs [N, hidden_size], one per input prefix.
-            oracle: Solver-sketch flags [N]. True selects execution alone; a critic-only reference does not set this flag.
-            remaining_blocks: Future budget [N], from 1 to self.horizons; selects epsilon_r and limits discovery delays.
+            hidden: Shared MLP outputs [B,D] or [B,L,D].
+            oracle: Solver-hint flags [B]; a critic-only reference does not activate execution-only prediction.
+            remaining_blocks: Final budget [B] or [B,L]. Interior tokens round up to whole blocks;
+                the saved 1× endpoint uses the exact remaining budget. Earlier deadlines subtract whole blocks.
 
         Returns:
-            Tensor: Float32 log(success) - log(failure) [N]. Sigmoid gives final-success probability.
+            Tensor: FP32 logits [B,H-1] or [B,L,H-1], for exact correctness at absolute checkpoints 2×–H×.
         """
-        # Compute log probabilities in FP32 even when the model and heads run under BF16 autocast.
-        strategy_discovered_logits = self.strategy_discovered(hidden).float().squeeze(-1)
-        log_strategy_discovered = F.logsigmoid(strategy_discovered_logits)
-        log_strategy_not_discovered = F.logsigmoid(-strategy_discovered_logits)
-        alpha_logits = self.discovery(hidden).float().squeeze(-1)
+        strategy_discovered_logits = self.strategy_discovered(hidden).float()
+        alpha_logits = self.discovery(hidden).float()
         execution_logits = self.execution(hidden).float()
-        log_alpha = F.logsigmoid(alpha_logits)
-        log_no_discovery = F.logsigmoid(-alpha_logits)
-        steps = torch.arange(self.horizons, device=hidden.device)
-        delays = remaining_blocks[:, None] - 1 - steps
+        deadlines_before_final = torch.arange(self.settings.horizon - 2, -1, -1, device=hidden.device)
+        remaining_at_deadlines = remaining_blocks[..., None] - deadlines_before_final
+        execution_indices = torch.arange(self.settings.horizon, device=hidden.device)
+        delays = remaining_at_deadlines[..., None] - 1 - execution_indices
 
-        # Discovery after a delay has weight alpha * (1 - alpha)^delay; exclude unreachable execution horizons.
-        log_weights = log_alpha[:, None] + delays.clamp_min(0) * log_no_discovery[:, None]
+        # Broadcast over both deadline and execution-budget axes; impossible discovery delays have zero weight.
+        log_weights = F.logsigmoid(alpha_logits)[..., None] + delays.clamp_min(0) * F.logsigmoid(-alpha_logits)[..., None]
         log_weights = log_weights.masked_fill(delays < 0, -torch.inf)
-        log_search_success = torch.logsumexp(log_weights + F.logsigmoid(execution_logits), dim=-1)
-        log_acquired_failure = torch.logsumexp(log_weights + F.logsigmoid(-execution_logits), dim=-1)
+        log_search_success = torch.logsumexp(log_weights + F.logsigmoid(execution_logits)[..., None, :], dim=-1)
+        log_acquired_failure = torch.logsumexp(log_weights + F.logsigmoid(-execution_logits)[..., None, :], dim=-1)
+        log_search_failure = torch.logaddexp(remaining_at_deadlines * F.logsigmoid(-alpha_logits), log_acquired_failure)
+        deadline_execution_logits = execution_logits.gather(-1, remaining_at_deadlines - 1)
 
-        # Failure also includes no discovery before the budget ends: (1 - alpha)^remaining_blocks.
-        log_search_failure = torch.logaddexp(remaining_blocks * log_no_discovery, log_acquired_failure)
-        terminal_execution = execution_logits.gather(-1, (remaining_blocks - 1).unsqueeze(-1)).squeeze(-1)
-
-        # A discovered strategy goes directly to execution; otherwise mix over future discovery times.
-        log_success = torch.logaddexp(log_strategy_discovered + F.logsigmoid(terminal_execution),
-                                     log_strategy_not_discovered + log_search_success)
-        log_failure = torch.logaddexp(log_strategy_discovered + F.logsigmoid(-terminal_execution),
-                                     log_strategy_not_discovered + log_search_failure)
-        # Oracle histories use only epsilon's logit; unaided histories use the combined discovery-execution logit.
-        return torch.where(oracle, terminal_execution, log_success - log_failure)
+        # A strategy already discovered needs only execution; otherwise marginalize over future discovery times.
+        log_success = torch.logaddexp(F.logsigmoid(strategy_discovered_logits) + F.logsigmoid(deadline_execution_logits),
+                                     F.logsigmoid(-strategy_discovered_logits) + log_search_success)
+        log_failure = torch.logaddexp(F.logsigmoid(strategy_discovered_logits) + F.logsigmoid(-deadline_execution_logits),
+                                     F.logsigmoid(-strategy_discovered_logits) + log_search_failure)
+        oracle_mask = oracle.reshape((-1,) + (1,) * (deadline_execution_logits.ndim - 1))
+        return torch.where(oracle_mask, deadline_execution_logits, log_success - log_failure)

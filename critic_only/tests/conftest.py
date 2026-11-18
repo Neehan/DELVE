@@ -134,14 +134,14 @@ def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": 0.,
+             "oracle": False, "remaining_blocks": 2, "labels": [1., 0.],
              "solver_mask": [False, True, True], "privileged_solver_mask": [False, False, True, True, True],
-             "branch": {"seed": 0, "final_correctness": 0, "path": "branch0"}},
+             "branch": {"seed": 0, "checkpoint_correctness": [1, 0], "path": "branch0"}},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "remaining_blocks": 1, "labels": 1.,
+             "oracle": False, "remaining_blocks": 2, "labels": [0., 1.],
              "solver_mask": [False, True], "privileged_solver_mask": None,
-             "branch": {"seed": 0, "final_correctness": 1, "path": "branch0"}}]
+             "branch": {"seed": 0, "checkpoint_correctness": [0, 1], "path": "branch0"}}]
 
 
 @pytest.fixture

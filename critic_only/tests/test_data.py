@@ -66,7 +66,7 @@ def test_individual_collection(prepared_inputs: CollectionFixture, tokenizer: Pr
     assert len(rows) == len({row["prefix_id"] for row in rows}) == 32
     for row in rows:
         assert "continue" not in row["branch"]["path"]
-        assert row["branch"]["final_correctness"] == row["branch"]["seed"] % 2
+        assert row["branch"]["checkpoint_correctness"] == [1, row["branch"]["seed"] % 2]
         assert row["remaining_blocks"] == 2
         assert "FINAL FUTURE" not in json.dumps(row["messages"])
         assert row["messages"][-1]["content"] == f"Thinking seed {row['branch']['seed']}"
@@ -79,7 +79,7 @@ def test_individual_collection(prepared_inputs: CollectionFixture, tokenizer: Pr
     assert len(storage.load_splits(("test",), storage.load_metadata()["tokenization"])["test"]) == 16
     for name, digest in shards.items():
         for row in storage.read_chunk(name, digest).to_list():
-            assert row["labels"] == row["branch"]["final_correctness"]
+            assert row["labels"] == row["branch"]["checkpoint_correctness"]
             assert len(row["input_ids"]) == len(row["solver_mask"])
             assert row["solver_mask"][-1] and row["privileged_solver_mask"][-1]
     with pytest.raises(FileExistsError):
@@ -92,7 +92,7 @@ def test_future_outcomes_do_not_change_input_tokens(prepared_inputs: CollectionF
     row = next(compile_fixture(prepared_inputs).iter_inputs())
     formatter = PrefixTokenizer(tokenizer)
     before = formatter.encode(row, encoding_settings)
-    row["branch"]["final_correctness"] = 1 - row["branch"]["final_correctness"]
+    row["branch"]["checkpoint_correctness"] = [1 - value for value in row["branch"]["checkpoint_correctness"]]
     after = formatter.encode(row, encoding_settings)
     assert before["labels"] != after["labels"]
     for key in ("prefix_id", "input_ids", "privileged_input_ids", "solver_mask", "privileged_solver_mask"):
@@ -235,7 +235,7 @@ def test_verified_outcome_and_mid_response_boundary(prepared_inputs: CollectionF
     identity = str(root.relative_to(prepared_inputs.outputs_directory))
     row = next(row for row in compile_fixture(prepared_inputs).iter_inputs() if row["branch"]["path"] == identity)
     assert row["messages"] == first
-    assert row["branch"]["final_correctness"] == expected
+    assert row["branch"]["checkpoint_correctness"] == [1, expected]
 
 
 @pytest.mark.parametrize("damage", ["duplicate_boundary", "missing_boundary", "missing_request", "invalid_score"])

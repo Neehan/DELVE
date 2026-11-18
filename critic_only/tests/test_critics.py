@@ -16,7 +16,7 @@ from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.eval.metrics import compute_metrics, evaluation_report, outcome_scores
 from critic_only.models.de_critic import DECritic
 from critic_only.models.ppo_critic import PPOCritic
-from critic_only.models.loader import create_critic, load_head_checkpoint
+from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
 
 
@@ -30,7 +30,7 @@ def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str],
     labels = batch.pop("labels")
     model.train()
     prediction = model(**batch)
-    assert prediction.shape == (len(labels),)
+    assert prediction.shape == (len(labels), model.settings.horizon - 1)
     loss = model.loss(prediction, labels, batch["oracle"]).mean()
     loss.backward()
     assert torch.isfinite(loss)
@@ -53,7 +53,7 @@ def test_checkpoint_shape_failure_preserves_model(critic_settings: Callable[[str
     directory = tmp_path / "checkpoint"
     model.save(directory)
     weights = {name: tensor + 1 for name, tensor in load_file(str(directory / MODEL_FILENAME)).items()}
-    weights["prediction_head.bias"] = torch.ones(2)
+    weights["prediction_head.bias"] = torch.ones(1)
     save_file(weights, str(directory / MODEL_FILENAME))
     with pytest.raises(ValueError, match="shape differs for prediction_head.bias"):
         model.load_from_weights(directory)
@@ -65,10 +65,10 @@ def test_binary_loss_weights_oracle_examples(critic_settings: Callable[[str], Cr
     """Apply the oracle weight to individual binary losses without changing unaided examples."""
     settings = critic_settings("ppo-critic").model_copy(update={"oracle_weight": 0.5})
     model = PPOCritic(settings)
-    logits = torch.zeros(2, requires_grad=True)
-    labels = torch.tensor([0., 1.])
+    logits = torch.zeros(2, 2, requires_grad=True)
+    labels = torch.tensor([[0., 1.], [1., 0.]])
     loss = model.loss(logits, labels, torch.tensor([False, True]))
-    expected = torch.log(torch.tensor(2.)) * torch.tensor([1., 0.5])
+    expected = torch.log(torch.tensor(2.)) * torch.tensor([[1., 1.], [0.5, 0.5]])
     torch.testing.assert_close(loss, expected)
     loss.mean().backward()
     assert logits.grad is not None
@@ -84,18 +84,18 @@ def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) ->
         model.discovery.weight.zero_()
         model.discovery.bias.fill_(-30)
         model.execution.weight.zero_()
-        model.execution.bias.copy_(torch.tensor([2.0, -2.0]))
-    output = model.predict(torch.zeros(2, model.settings.hidden_size), torch.tensor([False, False]), torch.tensor([1, 2]))
-    torch.testing.assert_close(output, torch.tensor([2.0, -2.0]))
-    assert output[1] < output[0]
+        model.execution.bias.copy_(torch.tensor([2.0, -2.0, 1.0]))
+    output = model.predict(torch.zeros(2, model.settings.hidden_size), torch.tensor([False, False]), torch.tensor([2, 2]))
+    torch.testing.assert_close(output, torch.tensor([[2., -2.], [2., -2.]]))
+    assert (output[:, 1] < output[:, 0]).all()
 
 
 def test_direct_head_is_shared_across_history_types(critic_settings: Callable[[str], CriticConfig]) -> None:
     """Condition metadata must not select a separate direct-model head; the actual history provides context."""
     model = create_critic(critic_settings("ppo-oracle-critic"), True)
     hidden = torch.randn(1, model.settings.hidden_size).expand(2, -1)
-    prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([1, 1]))
-    assert prediction.shape == (2,)
+    prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([2, 2]))
+    assert prediction.shape == (2, 2)
     torch.testing.assert_close(prediction[0], prediction[1])
 
 
@@ -104,9 +104,9 @@ def test_oracle_de_uses_execution_head(critic_settings: Callable[[str], CriticCo
     model = DECritic(critic_settings("de-critic"))
     hidden = torch.randn(2, model.settings.hidden_size)
     oracle = torch.tensor([True, True])
-    prediction = model.predict(hidden, oracle, torch.tensor([1, 2]))
-    torch.testing.assert_close(prediction, model.execution(hidden)[torch.arange(2), torch.tensor([0, 1])])
-    labels = torch.tensor([0., 1.])
+    prediction = model.predict(hidden, oracle, torch.tensor([2, 2]))
+    torch.testing.assert_close(prediction, model.execution(hidden)[:, :2])
+    labels = torch.tensor([[0., 1.], [1., 0.]])
     model.loss(prediction, labels, oracle).mean().backward()
     for parameter in (*model.discovery.parameters(), *model.strategy_discovered.parameters()):
         assert parameter.grad is not None
@@ -119,7 +119,7 @@ def test_metrics_score_individual_binary_outcomes() -> None:
     nll, brier = outcome_scores(np.array([0., 0.]), np.array([0, 1]))
     np.testing.assert_allclose(nll, np.log(2))
     np.testing.assert_allclose(brier, 0.25)
-    report = evaluation_report(np.array([2.]), np.array([0]), ["problem"])
+    report = evaluation_report(np.array([[2.]]), np.array([[0]]), ["problem"])
     assert report["terminal_brier"] > 0.7
 
 
@@ -136,11 +136,11 @@ def test_metrics_preserve_confident_error_penalties() -> None:
 
 def test_checkpoint_selection_matches_problem_macro_report() -> None:
     """Unequal prefix counts must not make checkpoint selection prefer the worse problem-level critic."""
-    labels = np.ones(4)
+    labels = np.ones((4, 1))
     problem_keys = ["problem-A"] * 3 + ["problem-B"]
     selected_scores = []
     for probabilities in ([0.9, 0.9, 0.9, 0.1], [0.5, 0.5, 0.5, 0.5]):
-        logits = logit(probabilities)
+        logits = logit(probabilities)[:, None]
         metrics = compute_metrics(EvalPrediction(logits, labels), problem_keys)
         report = evaluation_report(logits, labels, problem_keys)
         assert metrics["terminal_nll"] == report["terminal_nll"]
@@ -151,7 +151,7 @@ def test_checkpoint_selection_matches_problem_macro_report() -> None:
 
 @pytest.mark.parametrize("confidence", [-1000.0, -30.0, 30.0, 1000.0])
 @pytest.mark.parametrize("oracle", [False, True])
-@pytest.mark.parametrize("remaining", [1, 2])
+@pytest.mark.parametrize("remaining", [2, 3])
 def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, remaining: int,
                                           critic_settings: Callable[[str], CriticConfig]) -> None:
     """Extreme finite logits must retain learning signals without probability clamps, for both history types."""
@@ -163,7 +163,7 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, rem
         model.discovery.bias.fill_(confidence)
         model.execution.weight.zero_()
         model.execution.bias.fill_(confidence)
-    labels = torch.tensor([1. if confidence < 0 else 0.])
+    labels = torch.full((1, 2), 1. if confidence < 0 else 0.)
     condition = torch.tensor([oracle])
     with torch.autocast("cpu", dtype=torch.bfloat16):
         prediction = model.predict(torch.zeros(1, model.settings.hidden_size), condition, torch.tensor([remaining]))
@@ -174,7 +174,7 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, rem
     assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters() if parameter.grad is not None)
     assert model.execution.bias.grad is not None and model.execution.bias.grad.abs().sum() > 0
     if oracle:
-        torch.testing.assert_close(prediction, torch.tensor([confidence]))
+        torch.testing.assert_close(prediction, torch.full((1, 2), confidence))
 
 
 @pytest.mark.parametrize("horizon", [2, 3, 5, 8])
@@ -184,26 +184,26 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
     """Preserve the original discrete convolution and its gradients across budgets and autocast modes."""
     settings = critic_settings("de-critic").model_copy(update={"horizon": horizon})
     model = DECritic(settings)
-    remaining = torch.arange(1, horizon)
-    hidden = torch.randn(len(remaining), model.settings.hidden_size, requires_grad=True)
+    remaining = torch.tensor([[horizon, horizon - 1], [horizon, horizon - 1]])
+    hidden = torch.randn(2, 2, model.settings.hidden_size, requires_grad=True)
     with torch.autocast("cpu", dtype=dtype, enabled=dtype == torch.bfloat16):
-        prediction = model.predict(hidden, torch.zeros(len(hidden), dtype=torch.bool), remaining)
-        strategy_discovered = model.strategy_discovered(hidden).float().sigmoid().squeeze(-1)
+        prediction = model.predict(hidden, torch.zeros(2, dtype=torch.bool), remaining)
+        strategy = model.strategy_discovered(hidden).float().sigmoid().squeeze(-1)
         alpha = model.discovery(hidden).float().sigmoid().squeeze(-1)
         epsilon = model.execution(hidden).float().sigmoid()
     curve = []
-    for end in range(model.horizons):
-        value = strategy_discovered * epsilon[:, end]
+    for end in range(horizon):
+        value = strategy * epsilon[..., end]
         for delay in range(end + 1):
-            value = value + (1 - strategy_discovered) * alpha * (1 - alpha).pow(delay) * epsilon[:, end - delay]
+            value = value + (1 - strategy) * alpha * (1 - alpha).pow(delay) * epsilon[..., end - delay]
         curve.append(value)
     probabilities = torch.stack(curve, dim=-1)
-    expected = torch.logit(probabilities)[torch.arange(len(remaining)), remaining - 1]
-    actual = prediction
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, expected)
+    budgets = remaining[..., None] - torch.arange(horizon - 2, -1, -1)
+    expected = torch.logit(probabilities.gather(-1, budgets - 1))
+    assert prediction.dtype == torch.float32
+    torch.testing.assert_close(prediction, expected)
     parameters = (hidden, *model.strategy_discovered.parameters(), *model.discovery.parameters(), *model.execution.parameters())
-    actual_gradients = torch.autograd.grad(actual.sum(), parameters, retain_graph=True)
+    actual_gradients = torch.autograd.grad(prediction.sum(), parameters, retain_graph=True)
     expected_gradients = torch.autograd.grad(expected.sum(), parameters)
     for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
         torch.testing.assert_close(actual_gradient, expected_gradient)
@@ -311,62 +311,14 @@ def test_grouped_loss_matches_individual_outcomes(successes: int, trials: int,
     critic_settings: Callable[[str], CriticConfig]) -> None:
     """Fraction-target BCE and its gradient equal the mean across independent binary outcomes."""
     model = PPOCritic(critic_settings("ppo-critic"))
-    logits = torch.tensor([0.7], requires_grad=True)
-    label = torch.tensor([successes / trials])
+    logits = torch.tensor([[0.7]], requires_grad=True)
+    label = torch.tensor([[successes / trials]])
     grouped = model.loss(logits, label, torch.tensor([False])).mean()
     outcomes = torch.tensor([1.] * successes + [0.] * (trials - successes))
-    individual = torch.nn.functional.binary_cross_entropy_with_logits(logits.expand(trials), outcomes)
+    individual = torch.nn.functional.binary_cross_entropy_with_logits(logits.squeeze(0).expand(trials), outcomes)
     torch.testing.assert_close(grouped, individual)
     torch.testing.assert_close(torch.autograd.grad(grouped, logits)[0], torch.autograd.grad(individual, logits)[0])
     nll, brier = outcome_scores(logits.detach().numpy(), label.numpy())
     individual_nll, individual_brier = outcome_scores(np.full(trials, 0.7), outcomes.numpy())
     np.testing.assert_allclose(nll, individual_nll.mean(), rtol=1e-6)
     np.testing.assert_allclose(brier, individual_brier.mean(), rtol=1e-6)
-    report = evaluation_report(logits.detach().numpy(), label.numpy(), ["problem"])
-    assert report["value_mse"] == pytest.approx((torch.sigmoid(logits).item() - successes / trials) ** 2)
-
-
-@pytest.mark.parametrize("mode", ["full", "lora"])
-def test_head_transfer_preserves_pretrained_qwen(mode: str, critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
-    """A trained token head transfers exactly, while Qwen stays frozen during warm-up and unchanged during transfer."""
-    source = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
-    head = create_critic(source, True)
-    assert head.language_model is not None
-    qwen_before = {name: parameter.detach().clone() for name, parameter in head.language_model.named_parameters()}
-    parameters = [parameter for parameter in head.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(parameters, lr=3e-4)
-    ids = torch.tensor([[2, 3, 4]])
-    inputs = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
-    flags, budget = torch.tensor([False]), torch.tensor([2])
-    logits = head(inputs, flags, budget)
-    assert logits.shape == (1, 3)
-    head.loss(logits, torch.tensor([1.0]), flags).mean().backward()
-    optimizer.step()
-    for name, parameter in head.language_model.named_parameters():
-        assert parameter.grad is None and not parameter.requires_grad
-        torch.testing.assert_close(parameter, qwen_before[name], rtol=0, atol=0)
-    head.save(tmp_path / "head")
-    destination = source.model_copy(update={"training_mode": mode, "trainable_layers": 1,
-        "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
-    weights = load_head_checkpoint(destination, tmp_path / "head")
-    tuned = create_critic(destination, True)
-    assert tuned.language_model is not None
-    before_transfer = {name: parameter.detach().clone() for name, parameter in tuned.language_model.named_parameters()}
-    tuned.load_head_weights(weights)
-    for name, parameter in tuned.language_model.named_parameters():
-        torch.testing.assert_close(parameter, before_transfer[name], rtol=0, atol=0)
-    head.eval(); tuned.eval()
-    torch.testing.assert_close(head(inputs, flags, budget), tuned(inputs, flags, budget), rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize("field,value", [("data_signature", "other-inputs"), ("revision", "different-revision"),
-    ("hidden_size", 32), ("variant", "ppo-critic"), ("training_mode", "frozen")])
-def test_head_transfer_rejects_incompatible_source(field: str, value: Any,
-    critic_settings: Callable[[str], CriticConfig], tmp_path: Path) -> None:
-    """Do not transfer a head with different inputs, architecture, revision or training objective."""
-    source = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
-    create_critic(source, True).save(tmp_path / "head")
-    (tmp_path / "head" / CONFIG_FILENAME).write_text(source.model_copy(update={field: value}).model_dump_json())
-    destination = source.model_copy(update={"training_mode": "full", "trainable_layers": 1})
-    with pytest.raises(ValueError, match="head"):
-        load_head_checkpoint(destination, tmp_path / "head")

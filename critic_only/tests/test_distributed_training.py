@@ -46,11 +46,12 @@ def run_training(directory: Path, batch_size: int, accumulation: int) -> None:
                                                            "labels": np.asarray(prediction.label_ids).tolist()}))
 
 
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
-def test_two_rank_training_matches_single_batch(mode: str, critic_settings: Callable[[str], CriticConfig],
+def test_two_rank_training_matches_single_batch(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Unequal token counts and oracle weights preserve updates; odd-sized evaluation keeps exact row order."""
-    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": mode,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode,
         "trainable_layers": None if mode == "head" else 1, "oracle_weight": 0.4,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     (tmp_path / "settings.json").write_text(settings.model_dump_json())

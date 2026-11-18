@@ -129,19 +129,20 @@ def test_stale_objective_rejected(tmp_path: Path) -> None:
         CriticInputStorage(tmp_path).load_metadata()
 
 
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("mode", ["lora", "full"])
-def test_token_values_are_causal(mode: str, critic_settings: Callable[[str], CriticConfig]) -> None:
+def test_token_values_are_causal(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig]) -> None:
     """A value at token t equals a separate forward stopped at t, and later tokens cannot change it."""
-    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": mode, "trainable_layers": 1,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": 1,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     model = create_critic(settings, True).eval()
     ids = torch.tensor([[2, 3, 4, 5]])
-    flags, budget = torch.tensor([False]), torch.tensor([2])
+    flags, budget = torch.tensor([False]), torch.tensor([[2, 2, 2, 2]])
     values = model({"input_ids": ids, "attention_mask": torch.ones_like(ids)}, flags, budget)
-    assert values.shape == ids.shape
+    assert values.shape == (*ids.shape, settings.horizon - 1)
     for endpoint in range(1, ids.shape[1] + 1):
         prefix = ids[:, :endpoint]
-        value = model({"input_ids": prefix, "attention_mask": torch.ones_like(prefix)}, flags, budget)
+        value = model({"input_ids": prefix, "attention_mask": torch.ones_like(prefix)}, flags, budget[:, :endpoint])
         torch.testing.assert_close(values[:, endpoint - 1], value[:, -1], atol=1e-6, rtol=1e-5)
     changed = ids.clone()
     changed[:, 2:] = 7
@@ -157,18 +158,19 @@ def test_loss_masks_and_endpoint_selection(critic_settings: Callable[[str], Crit
                                    "privileged_solver_mask": [False, True], "length": 2}]
     trainer = make_trainer(tmp_path / "run", settings, tokenizer, rows, [])
     batch = trainer.data_collator(rows)
-    logits = torch.tensor([[9., .1, -.3, .7], [8., -.5, 10., 10.]], requires_grad=True)
+    logits = torch.tensor([[[9., 9.], [.1, -.2], [-.3, .4], [.7, -.6]],
+                           [[8., 8.], [-.5, .3], [10., 10.], [10., 10.]]], requires_grad=True)
     model = cast(BaseCritic, trainer.model)
     monkeypatch.setattr(model, "forward", lambda **kwargs: logits)
     loss, output = trainer.compute_loss(model, batch, return_outputs=True)
-    first = torch.nn.functional.binary_cross_entropy_with_logits(logits[0, 1:], batch["labels"][0].expand(3))
+    first = torch.nn.functional.binary_cross_entropy_with_logits(logits[0, 1:], batch["labels"][0].expand(3, 2))
     second = torch.nn.functional.binary_cross_entropy_with_logits(logits[1, 1], batch["labels"][1])
     torch.testing.assert_close(loss, (first + second) / 2)
     torch.testing.assert_close(output["logits"], torch.stack([logits[0, 3], logits[1, 1]]))
     loss.backward()
     assert logits.grad is not None
     assert logits.grad[~batch["inputs"]["solver_mask"]].count_nonzero() == 0
-    assert logits.grad[batch["inputs"]["solver_mask"]].count_nonzero() == 4
+    assert logits.grad[batch["inputs"]["solver_mask"]].count_nonzero() == 8
 
 
 @pytest.mark.parametrize("mask", [[], [False] * 4, [True], [True, True, True, False]])
@@ -180,11 +182,12 @@ def test_invalid_supervision_masks_rejected(mask: list[bool], tokenizer: PreTrai
         CriticBatcher(tokenizer)([row])
 
 
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("mode", ["lora", "full"])
-def test_padding_cannot_change_values_or_gradients(mode: str, critic_settings: Callable[[str], CriticConfig],
+def test_padding_cannot_change_values_or_gradients(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
     """A one-token solver span in a padded batch has the same values and gradient as its unpadded forward."""
-    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": mode,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode,
         "trainable_layers": 1, "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     model = create_critic(settings, True).eval()
     rows = [{**reference_token_rows[0], "privileged_input_ids": [2, 3], "privileged_solver_mask": [False, True]},
@@ -195,7 +198,7 @@ def test_padding_cannot_change_values_or_gradients(mode: str, critic_settings: C
     expected = model(single["inputs"], single["oracle"], single["remaining_blocks"])
     torch.testing.assert_close(values[:1, :2], expected)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    for actual, target in zip(torch.autograd.grad(values[0, 1], parameters), torch.autograd.grad(expected[0, 1], parameters)):
+    for actual, target in zip(torch.autograd.grad(values[0, 1].sum(), parameters), torch.autograd.grad(expected[0, 1].sum(), parameters)):
         torch.testing.assert_close(actual, target, atol=1e-6, rtol=1e-4)
 
 
@@ -217,15 +220,15 @@ def test_cached_and_live_endpoints_match(mode: str, critic_settings: Callable[[s
         expected = frozen(vectors, batch["oracle"], batch["remaining_blocks"])
         token_logits = live(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
         positions = batch["inputs"]["attention_mask"].sum(-1) - 1
-    torch.testing.assert_close(token_logits.gather(-1, positions[:, None]).squeeze(-1), expected, atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(token_logits[torch.arange(len(positions)), positions], expected, atol=1e-6, rtol=1e-5)
 
 
 @pytest.mark.parametrize("label", [0., 1.])
 def test_extreme_token_logits_stay_finite(label: float, critic_settings: Callable[[str], CriticConfig]) -> None:
     """Correct and incorrect saturated predictions retain finite BCE and gradients, including zero oracle weight."""
     model = create_critic(critic_settings("ppo-oracle-critic").model_copy(update={"oracle_weight": 0}), True)
-    logits = torch.tensor([[-1000., 1000.], [1000., -1000.]], requires_grad=True)
-    loss = model.loss(logits, torch.tensor([label, label]), torch.tensor([False, True]))
+    logits = torch.tensor([[[-1000., 1000.]], [[1000., -1000.]]], requires_grad=True)
+    loss = model.loss(logits, torch.tensor([[label, label], [label, label]]), torch.tensor([False, True]))
     assert torch.isfinite(loss).all() and loss[1].count_nonzero() == 0
     loss.mean().backward()
     assert logits.grad is not None and torch.isfinite(logits.grad).all()
