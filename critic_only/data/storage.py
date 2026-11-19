@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
+import pyarrow as pa
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -38,7 +39,9 @@ class CriticInputStorage:
         """
         manifest = read_manifest(self.directory)
         if manifest["tokenization"]["settings"].get("target") != CRITIC_TARGET:
-            raise ValueError("critic input objective changed; rerun setup into a new destination")
+            raise ValueError("critic input objective changed; rerun setup with --reprocess")
+        if manifest["tokenization"]["settings"]["checkpoint_interval_tokens"] <= 0:
+            raise ValueError("invalid saved checkpoint interval")
         return manifest
 
     def save_inputs(self, encoded: Dataset, tokenizer: PreTrainedTokenizerBase, settings: dict[str, Any]) -> dict[str, str]:
@@ -52,6 +55,8 @@ class CriticInputStorage:
         Returns:
             dict[str, str]: Model-relative chunk paths and checksums, also recorded in the completed tokenization section.
         """
+        if "tokenization" in read_manifest(self.directory):
+            raise FileExistsError("token inputs already exist; rebuild through setup --reprocess")
         checksums = {}
         for split in SPLITS:
             partition = encoded.filter(lambda assignment: assignment == split, input_columns=["split"], load_from_cache_file=False).remove_columns("split")
@@ -62,8 +67,12 @@ class CriticInputStorage:
                 if path.exists():
                     raise FileExistsError(path)
                 rows = partition.select(range(start, min(start + INPUT_CHUNK_ROWS, len(partition))))
-                write_parquet_atomic(path, rows.with_format("arrow")[:])
-                checksums[str(path.relative_to(self.directory))] = file_digest(path)
+                # HF embeds its transient dataset fingerprint in Arrow metadata; retain only the stable row schema.
+                write_parquet_atomic(path, cast(pa.Table, rows.with_format("arrow")[:]).replace_schema_metadata(None))
+                digest = file_digest(path)
+                content_path = path.with_name(f"part-{chunk:05d}-{digest}.parquet")
+                path.rename(content_path)
+                checksums[str(content_path.relative_to(self.directory))] = digest
         tokenizer.save_pretrained(self.directory / CRITIC_SUBDIRECTORY / TOKENIZER_SUBDIRECTORY)
         manifest = read_manifest(self.directory)
         manifest["tokenization"] = {"settings": settings, "complete": True, "shards": checksums}

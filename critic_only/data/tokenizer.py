@@ -1,6 +1,6 @@
 """Build critic prompts and save their token IDs, with and without a reference solution.
 
-The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s exact future checkpoint labels, kept outside the prompt.
+The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s future checkpoint grades, kept outside the prompt.
 """
 
 import hashlib
@@ -9,7 +9,6 @@ from typing import Any, cast
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 
-from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 from critic_only.constants import TOKEN_HASH_DTYPE
 from critic_only.data.models import InputPrefix
 from critic_only.data.solver_tokens import conversation_spans, solver_token_mask
@@ -31,7 +30,7 @@ class PrefixTokenizer:
         """Tokenize the observed history and keep its future grades outside both input views.
 
         Args:
-            row: Serialized InputPrefix containing the saved 1× history, matching reference and future checkpoint grades.
+            row: Serialized InputPrefix containing the reconstructed 1× history, matching reference and future checkpoint grades.
             settings: Pinned prompts, total horizon and maximum input length. Only the total budget precedes the history; endpoint metadata would leak backward to earlier tokens.
 
         Returns:
@@ -41,7 +40,7 @@ class PrefixTokenizer:
         if len(record.branch.checkpoint_correctness) != settings["horizon"] - 1 or record.remaining_blocks != settings["horizon"] - 1:
             raise ValueError(f"checkpoint labels do not match the 1× input budget: {record.prefix_id}")
         conversation, spans = conversation_spans(record.messages)
-        system = settings["critic_prompt"].format(block_tokens=OUTPUT_TOKENS_PER_BLOCK, horizon=settings["horizon"])
+        system = settings["critic_prompt"].format(block_tokens=settings["checkpoint_interval_tokens"], horizon=settings["horizon"])
         messages = [{"role": "system", "content": system}, {"role": "user", "content": conversation}]
         token_ids, mask = self._encode_messages(messages, spans, settings["max_length"], record.prefix_id)
         privileged_ids, privileged_mask = None, None

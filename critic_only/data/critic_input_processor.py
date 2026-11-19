@@ -1,4 +1,4 @@
-"""Pair each root trajectory’s first block with exact grades at every future checkpoint."""
+"""Pair each root trajectory’s analysis prefix with grades from its reconstructed checkpoint table."""
 
 import hashlib
 import json
@@ -7,21 +7,24 @@ from typing import Any
 from collections.abc import Iterator
 
 from datasets import Dataset, concatenate_datasets
+from math_verify.errors import TimeoutException
 
-from discovery_execution.audit.answer_grader import validate_grading_rule
+from discovery_execution.audit.answer_grader import AnswerGrader, validate_grading_rule
 from discovery_execution.harness.constants import (
     AUDIT_FILENAME, CONVERSATION_FILENAME,
-    META_FILENAME, OUTPUT_TOKENS_PER_BLOCK,
+    META_FILENAME, OUTPUT_TOKENS_PER_BLOCK, DEFAULT_BLOCKS,
 )
 from discovery_execution.harness.models import Problem, RunState
 from critic_only.constants import DEFAULT_SEED, HASH_SCALE, INPUT_PREFIX_BLOCKS, TRAJECTORY_SEEDS
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLIT_FILENAME
+from discovery_execution.processing.checkpoint_reconstructor import CheckpointReconstructor
+from discovery_execution.processing.models import GradedCheckpoint
 from discovery_execution.processing.storage import checkpoint_snapshot, file_digest
 from critic_only.data.models import BranchOutcome, InputPrefix, PreparationConfig
 
 
 def is_input_trajectory(metadata: dict[str, Any], horizon: int) -> bool:
-    """Return whether metadata describes an eligible root run at the requested final horizon.
+    """Return whether metadata describes an eligible root run at the original generation horizon.
 
     Only unaided runs and oracle-at-zero runs supply individual 1× inputs. Continuation arms are excluded.
     """
@@ -84,21 +87,24 @@ def select_training_problems(dataset: Dataset, fraction: float) -> Dataset:
 
 
 class CriticInputProcessor:
-    """Yield one observed 1× history and future binary labels per root trajectory.
+    """Yield one 1× analysis history and future binary labels per root trajectory.
 
     iter_inputs checks identities, saved hints and audits. References follow the saved solution selection or seed round robin.
     """
 
-    def __init__(self, config: PreparationConfig) -> None:
+    def __init__(self, config: PreparationConfig, checkpoints: CheckpointReconstructor) -> None:
         """Check the processed files and index trajectory IDs for later lookup.
 
         Args:
-            config: Processed model directory and requested final rollout horizon.
+            config: Processed model directory and analysis horizon.
+            checkpoints: Reconstructs and grades the finer analysis boundaries.
 
         Returns:
             None. Verifies source checksums and indexes saved trajectories and problems for iter_inputs.
         """
         self.config = config
+        self.checkpoint_builder = checkpoints
+        self.checkpoint_rows: list[dict[str, Any]] = []
         self.manifest = json.loads((config.source_directory / MANIFEST_FILENAME).read_text())
         if file_digest(config.source_directory.parent / SPLIT_FILENAME) != self.manifest["split_sha256"]:
             raise ValueError("problem split assignments changed")
@@ -118,16 +124,20 @@ class CriticInputProcessor:
 
     def iter_inputs(self) -> Iterator[dict[str, Any]]:
         """Yield individual histories for seeds 0–7; duplicate problem/condition/seed identities raise an error."""
+        self.checkpoint_rows.clear()
         identities = set()
         for name, text in zip(self.dataset["trajectory_id"], self.dataset["metadata"]):
             metadata = json.loads(text)
-            if not is_input_trajectory(metadata, self.config.horizon) or metadata["seed"] not in TRAJECTORY_SEEDS:
+            if not is_input_trajectory(metadata, DEFAULT_BLOCKS) or metadata["seed"] not in TRAJECTORY_SEEDS:
                 continue
             identity = tuple(metadata[key] for key in ("competition", "year", "problem_id", "model", "experiment", "seed"))
             if identity in identities:
                 raise ValueError(f"duplicate saved trajectory: {name}")
             identities.add(identity)
-            yield self._build_input(Path(name), metadata).model_dump()
+            try:
+                yield self._build_input(Path(name), metadata).model_dump()
+            except (ValueError, IndexError, KeyError, TimeoutException) as error:
+                raise ValueError(f"invalid trajectory {name}: {error}") from error
 
     def _read_json(self, path: Path) -> Any:
         """Read saved run metadata, conversation, or audit JSON from a Parquet row.
@@ -158,7 +168,7 @@ class CriticInputProcessor:
         return self.problems[key]
 
     def _build_input(self, path: Path, metadata: dict[str, Any]) -> InputPrefix:
-        """Pair a saved 1× input with later grades and the solution corresponding to its sketch.
+        """Pair a reconstructed 1× input with later grades and the solution corresponding to its sketch.
 
         Args:
             path: Saved root trajectory ID, used to read the conversation, audit and split.
@@ -168,9 +178,14 @@ class CriticInputProcessor:
             InputPrefix: Observed messages and matching reference, with 2×–H× grades stored separately in branch. Later reasoning is never copied into the input.
         """
         oracle = metadata["experiment"] == "oracle-execution"
-        outcome = self._read_branch_outcome(path, metadata)
-        snapshot = self._read_input_checkpoint(path, oracle)
         problem = self._load_problem(metadata)
+        state, checkpoints = self._graded_checkpoints(path, problem)
+        boundary = checkpoints[INPUT_PREFIX_BLOCKS - 1]
+        snapshot = checkpoint_snapshot(state, boundary)
+        if state.injected != oracle or any(request["injected"] != oracle for request in state.requests):
+            raise ValueError(f"input checkpoint lacks the expected oracle state: {path}")
+        outcome = BranchOutcome(seed=metadata["seed"], path=str(path),
+            checkpoint_correctness=[item.correctness for item in checkpoints[INPUT_PREFIX_BLOCKS:self.config.horizon]])
         if problem.statement not in snapshot["messages"][0]["content"]:
             raise ValueError(f"current problem statement differs from saved solver input: {path}")
         saved_index = metadata["solution_index"] if oracle else None
@@ -180,56 +195,31 @@ class CriticInputProcessor:
         if oracle and not any(message["role"] == "user" and solution.sketch in message["content"]
                               for message in snapshot["messages"][:first_response]):
             raise ValueError(f"current sketch differs from saved intervention: {path}")
-        return InputPrefix(prefix_id=f"{path}/checkpoint_{INPUT_PREFIX_BLOCKS}x", oracle=oracle,
+        return InputPrefix(prefix_id=f"{path}/checkpoint_{boundary.output_tokens}tokens", oracle=oracle,
             problem_key=f"{problem.competition}/{problem.year}/{problem.problem_id}",
             remaining_blocks=self.config.horizon - INPUT_PREFIX_BLOCKS,
             split=self.dataset.select_columns(["split"])[self.indices[str(path)]]["split"], messages=snapshot["messages"],
             solution_index=solution_index, reference_solution=solution.solution, branch=outcome)
 
-    def _read_input_checkpoint(self, path: Path, oracle: bool) -> dict[str, Any]:
-        """Reconstruct the exact first-block history and check its oracle state.
+    def _graded_checkpoints(self, path: Path, problem: Problem) -> tuple[RunState, list[GradedCheckpoint]]:
+        """Read one source state, validate its audit, and retain every derived checkpoint.
 
         Args:
-            path: Saved trajectory ID whose conversation contains checkpoint boundaries.
-            oracle: Whether the reconstructed history must contain a solver-visible sketch injection.
+            path: Saved trajectory identity used to read the state and audit.
+            problem: Frozen problem record supplying the verified answer.
 
         Returns:
-            dict[str, Any]: Saved messages and generated-token count at the first block boundary.
+            tuple: Original state and graded analysis boundaries, including checkpoints beyond training's horizon.
         """
-        tokens = INPUT_PREFIX_BLOCKS * OUTPUT_TOKENS_PER_BLOCK
         state = RunState.model_validate(self._read_json(path / CONVERSATION_FILENAME))
-        if state.output_tokens < tokens:
-            raise ValueError(f"checkpoint exceeds saved conversation progress: {path}")
-        boundaries = [item for item in state.checkpoints if item.output_tokens == tokens]
-        requests = [item for item in state.requests if item["output_tokens"] <= tokens]
-        if len(boundaries) != 1 or not requests or requests[-1]["output_tokens"] != tokens:
-            raise ValueError(f"conversation lacks the input checkpoint boundary: {path}")
-        snapshot = checkpoint_snapshot(state, boundaries[0])
-        messages = snapshot["messages"]
-        if messages[-1]["role"] != "assistant" or requests[-1]["injected"] != oracle:
-            raise ValueError(f"input checkpoint lacks the expected solver response or oracle state: {path}")
-        if not oracle and any(item["injected"] for item in requests):
-            raise ValueError(f"unaided history contains a sketch injection: {path}")
-        return snapshot
-
-    def _read_branch_outcome(self, path: Path, metadata: dict[str, Any]) -> BranchOutcome:
-        """Read exact checkpoint grades, rejecting incomplete or inconsistent audits.
-
-        Args:
-            path: Saved trajectory ID whose audit supplies exact checkpoint labels.
-            metadata: Run metadata providing the trajectory seed.
-
-        Returns:
-            BranchOutcome: Branch seed, trajectory ID, and correctness at each checkpoint after the input boundary.
-        """
         audit = self._read_json(path / AUDIT_FILENAME)
         validate_grading_rule(audit, str(path))
-        if audit["complete"] is not True or audit["output_tokens"] != self.config.horizon * OUTPUT_TOKENS_PER_BLOCK:
+        metadata = self._read_json(path / META_FILENAME)
+        source_budget = metadata["compute_multiplier_k"] * OUTPUT_TOKENS_PER_BLOCK
+        if audit["complete"] is not True or audit["output_tokens"] != source_budget or state.output_tokens != source_budget:
             raise ValueError(f"incomplete branch audit: {path}")
-        expected = [f"{k}x" for k in range(1, self.config.horizon + 1)]
-        if set(audit["checkpoints"]) != set(expected):
-            raise ValueError(f"missing or unexpected audit checkpoints: {path}")
-        return BranchOutcome(seed=metadata["seed"],
-                             checkpoint_correctness=[audit["checkpoints"][key]["correctness"]["score"]
-                                                     for key in expected[INPUT_PREFIX_BLOCKS:]],
-                             path=str(path))
+        if source_budget < self.config.horizon * self.checkpoint_builder.interval_tokens:
+            raise ValueError("analysis horizon exceeds saved generation budget")
+        checkpoints = self.checkpoint_builder.reconstruct(state, audit, AnswerGrader(problem.final_answer))
+        self.checkpoint_rows.append({"trajectory_id": str(path), "checkpoints": [item.model_dump() for item in checkpoints]})
+        return state, checkpoints

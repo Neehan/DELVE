@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 import zstandard
 from datasets import Dataset
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast
 
 from critic_only.constants import CRITIC_TARGET, TRAJECTORY_SEEDS
@@ -18,6 +21,7 @@ from critic_only.data.critic_input_processor import CriticInputProcessor, is_inp
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
+from discovery_execution.processing.checkpoint_reconstructor import CheckpointReconstructor
 from discovery_execution.processing.problem_splits import ProblemSplits
 from discovery_execution.audit.answer_grader import AnswerGrader
 from discovery_execution.audit.constants import CRITIQUE_PROMPT_PATH
@@ -28,7 +32,11 @@ def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     """Compile real raw artifacts, then select critic inputs from the shared Parquet collection."""
     splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
     TrajectoryProcessor(config.outputs_directory, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS)
-    return CriticInputProcessor(PreparationConfig(source_directory=config.destination, horizon=config.horizon))
+    backend = Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
+    return CriticInputProcessor(PreparationConfig(source_directory=config.destination, horizon=config.horizon),
+        CheckpointReconstructor(tokenizer, OUTPUT_TOKENS_PER_BLOCK))
 
 
 def test_exact_fixed_splits(prepared_inputs: CollectionFixture) -> None:
