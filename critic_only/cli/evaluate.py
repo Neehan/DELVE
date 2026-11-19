@@ -1,6 +1,6 @@
 """Evaluate a saved critic and write metrics.json and predictions.parquet.
 
-Use unaided prefixes from the requested split with reference solutions visible to the critic. Frozen mode reads cached vectors; head, LoRA and full modes read tokens and load Qwen.
+Use unaided prefixes from the requested split with reference solutions visible to the critic. All modes read tokens and load Qwen; the loss supervises all solver tokens and reported metrics use the 1× endpoint.
 """
 
 import argparse
@@ -17,9 +17,8 @@ from transformers.trainer_utils import PredictionOutput
 
 from transformers.utils.logging import disable_progress_bar
 
-from critic_only.constants import CONFIG_FILENAME, DEFAULT_BATCH_SIZE, DEFAULT_TOKEN_BATCH_SIZE
+from critic_only.constants import CONFIG_FILENAME, DEFAULT_TOKEN_BATCH_SIZE
 from discovery_execution.processing.constants import SPLITS
-from critic_only.data.hidden_state_dataset import HiddenStateDataset
 from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.data.storage import CriticInputStorage
 from critic_only.data.dataset_loader import load_critic_splits, input_signature
@@ -72,23 +71,23 @@ def main() -> None:
     args = parser.parse_args()
     settings = CriticConfig.model_validate_json((args.checkpoint / CONFIG_FILENAME).read_text())
     if args.batch_size is None:
-        args.batch_size = DEFAULT_BATCH_SIZE if settings.training_mode == "frozen" else DEFAULT_TOKEN_BATCH_SIZE
+        args.batch_size = DEFAULT_TOKEN_BATCH_SIZE
     if args.batch_size <= 0:
         parser.error("batch-size must be positive")
     if args.destination.exists():
         raise FileExistsError(args.destination)
-    datasets, cache = load_critic_splits(args.data, (args.split,), settings.training_mode)
-    if input_signature(cache, settings.training_mode) != settings.data_signature:
+    datasets, cache = load_critic_splits(args.data, (args.split,))
+    if input_signature(cache) != settings.data_signature:
         raise ValueError("evaluation inputs differ from training")
     dataset = select_unaided_examples(datasets[args.split])
     model = create_critic(settings, args.cpu)
     model.load_from_weights(args.checkpoint)
-    training = TrainingArguments(output_dir=str(args.destination), use_cpu=args.cpu, bf16=settings.training_mode != "frozen" and not args.cpu,
+    training = TrainingArguments(output_dir=str(args.destination), use_cpu=args.cpu, bf16=not args.cpu,
                                  per_device_eval_batch_size=args.batch_size, remove_unused_columns=False,
                                  label_names=["labels"], report_to="none", disable_tqdm=True)
-    tokenizer = None if settings.training_mode == "frozen" else CriticInputStorage(args.data).load_tokenizer()
+    tokenizer = CriticInputStorage(args.data).load_tokenizer()
     trainer = BaseTrainer(model=model, args=training, data_collator=CriticBatcher(tokenizer))
-    result = trainer.predict(cast(Any, HiddenStateDataset(dataset) if settings.training_mode == "frozen" else dataset))
+    result = trainer.predict(cast(Any, dataset))
     if trainer.is_world_process_zero():
         save_evaluation(result, dataset, args)
 

@@ -158,7 +158,15 @@ class CriticInputProcessor:
         return self.problems[key]
 
     def _build_input(self, path: Path, metadata: dict[str, Any]) -> InputPrefix:
-        """Return the exact first-block history, matching reference and future checkpoint grades for path/metadata."""
+        """Pair a saved 1× input with later grades and the solution corresponding to its sketch.
+
+        Args:
+            path: Saved root trajectory ID, used to read the conversation, audit and split.
+            metadata: Run identity, condition, seed and saved oracle solution index.
+
+        Returns:
+            InputPrefix: Observed messages and matching reference, with 2×–H× grades stored separately in branch. Later reasoning is never copied into the input.
+        """
         oracle = metadata["experiment"] == "oracle-execution"
         outcome = self._read_branch_outcome(path, metadata)
         snapshot = self._read_input_checkpoint(path, oracle)

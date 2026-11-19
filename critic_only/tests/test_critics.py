@@ -1,4 +1,4 @@
-"""Exercise cached-feature MLPs, binary losses, and the DE convolution's limiting cases."""
+"""Exercise token-wise MLPs, binary losses, and the DE convolution's limiting cases."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -22,19 +22,20 @@ from critic_only.models.models import CriticConfig
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str], CriticConfig],
-                                   tokenizer: PreTrainedTokenizerFast, training_rows: list[dict[str, Any]], tmp_path: Path) -> None:
+                                   tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """All MLP and head parameters train; compact checkpoints reproduce predictions exactly."""
     model = create_critic(critic_settings(variant), True)
     assert type(model).__name__ == {"ppo-critic": "PPOCritic", "ppo-oracle-critic": "PPOOracleCritic", "de-critic": "DECritic"}[variant]
-    batch = CriticBatcher(None)(training_rows)
+    batch = CriticBatcher(tokenizer)(reference_token_rows)
     labels = batch.pop("labels")
     model.train()
     prediction = model(**batch)
-    assert prediction.shape == (len(labels), model.settings.horizon - 1)
+    assert prediction.shape == (*batch["inputs"]["input_ids"].shape, model.settings.horizon - 1)
     loss = model.loss(prediction, labels, batch["oracle"]).mean()
     loss.backward()
     assert torch.isfinite(loss)
-    assert all(value.requires_grad and value.grad is not None for value in model.parameters())
+    assert all(parameter.grad is not None for parameter in model.parameters() if parameter.requires_grad)
+    assert all(not parameter.requires_grad and parameter.grad is None for parameter in model.language_model.parameters())
     directory = tmp_path / "checkpoint"
     model.eval()
     expected = model(**batch).detach()
@@ -65,24 +66,22 @@ def test_binary_loss_weights_oracle_examples(critic_settings: Callable[[str], Cr
     """Apply the oracle weight to individual binary losses without changing unaided examples."""
     settings = critic_settings("ppo-critic").model_copy(update={"oracle_weight": 0.5})
     model = PPOCritic(settings)
-    logits = torch.zeros(2, 2, requires_grad=True)
+    logits = torch.zeros(2, 1, 2, requires_grad=True)
     labels = torch.tensor([[0., 1.], [1., 0.]])
     loss = model.loss(logits, labels, torch.tensor([False, True]))
     expected = torch.log(torch.tensor(2.)) * torch.tensor([[1., 1.], [0.5, 0.5]])
-    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(loss, expected[:, None, :])
     loss.mean().backward()
     assert logits.grad is not None
 
 
 def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) -> None:
-    """A discovered strategy uses execution even when future discovery is unlikely; revisions can regress."""
+    """Immediate discovery reduces DE to execution; later revisions can still spoil a correct answer."""
     model = DECritic(critic_settings("de-critic"))
     assert isinstance(model, DECritic)
     with torch.no_grad():
-        model.strategy_discovered.weight.zero_()
-        model.strategy_discovered.bias.fill_(30)
         model.discovery.weight.zero_()
-        model.discovery.bias.fill_(-30)
+        model.discovery.bias.fill_(30)
         model.execution.weight.zero_()
         model.execution.bias.copy_(torch.tensor([2.0, -2.0, 1.0]))
     output = model.predict(torch.zeros(2, model.settings.hidden_size), torch.tensor([False, False]), torch.tensor([2, 2]))
@@ -107,8 +106,8 @@ def test_oracle_de_uses_execution_head(critic_settings: Callable[[str], CriticCo
     prediction = model.predict(hidden, oracle, torch.tensor([2, 2]))
     torch.testing.assert_close(prediction, model.execution(hidden)[:, :2])
     labels = torch.tensor([[0., 1.], [1., 0.]])
-    model.loss(prediction, labels, oracle).mean().backward()
-    for parameter in (*model.discovery.parameters(), *model.strategy_discovered.parameters()):
+    model.loss(prediction[:, None, :], labels, oracle).mean().backward()
+    for parameter in model.discovery.parameters():
         assert parameter.grad is not None
         torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter))
     assert model.execution.weight.grad is not None and model.execution.weight.grad.abs().sum() > 0
@@ -157,8 +156,6 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, rem
     """Extreme finite logits must retain learning signals without probability clamps, for both history types."""
     model = DECritic(critic_settings("de-critic"))
     with torch.no_grad():
-        model.strategy_discovered.weight.zero_()
-        model.strategy_discovered.bias.fill_(confidence)
         model.discovery.weight.zero_()
         model.discovery.bias.fill_(confidence)
         model.execution.weight.zero_()
@@ -167,7 +164,7 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, rem
     condition = torch.tensor([oracle])
     with torch.autocast("cpu", dtype=torch.bfloat16):
         prediction = model.predict(torch.zeros(1, model.settings.hidden_size), condition, torch.tensor([remaining]))
-        loss = model.loss(prediction, labels, condition).mean()
+        loss = model.loss(prediction[:, None, :], labels, condition).mean()
     assert torch.isfinite(prediction).all()
     assert torch.isfinite(loss)
     loss.backward()
@@ -188,21 +185,20 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
     hidden = torch.randn(2, 2, model.settings.hidden_size, requires_grad=True)
     with torch.autocast("cpu", dtype=dtype, enabled=dtype == torch.bfloat16):
         prediction = model.predict(hidden, torch.zeros(2, dtype=torch.bool), remaining)
-        strategy = model.strategy_discovered(hidden).float().sigmoid().squeeze(-1)
         alpha = model.discovery(hidden).float().sigmoid().squeeze(-1)
         epsilon = model.execution(hidden).float().sigmoid()
     curve = []
     for end in range(horizon):
-        value = strategy * epsilon[..., end]
+        value = torch.zeros_like(alpha)
         for delay in range(end + 1):
-            value = value + (1 - strategy) * alpha * (1 - alpha).pow(delay) * epsilon[..., end - delay]
+            value = value + alpha * (1 - alpha).pow(delay) * epsilon[..., end - delay]
         curve.append(value)
     probabilities = torch.stack(curve, dim=-1)
     budgets = remaining[..., None] - torch.arange(horizon - 2, -1, -1)
     expected = torch.logit(probabilities.gather(-1, budgets - 1))
     assert prediction.dtype == torch.float32
     torch.testing.assert_close(prediction, expected)
-    parameters = (hidden, *model.strategy_discovered.parameters(), *model.discovery.parameters(), *model.execution.parameters())
+    parameters = (hidden, *model.discovery.parameters(), *model.execution.parameters())
     actual_gradients = torch.autograd.grad(prediction.sum(), parameters, retain_graph=True)
     expected_gradients = torch.autograd.grad(expected.sum(), parameters)
     for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients):
@@ -304,21 +300,3 @@ def test_full_layer_selection_updates_and_restores(layer_count: int, expected_la
     restored.load_from_weights(checkpoint)
     restored.eval()
     torch.testing.assert_close(restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"]), expected, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("successes,trials", [(0, 8), (3, 8), (7, 16), (16, 16)])
-def test_grouped_loss_matches_individual_outcomes(successes: int, trials: int,
-    critic_settings: Callable[[str], CriticConfig]) -> None:
-    """Fraction-target BCE and its gradient equal the mean across independent binary outcomes."""
-    model = PPOCritic(critic_settings("ppo-critic"))
-    logits = torch.tensor([[0.7]], requires_grad=True)
-    label = torch.tensor([[successes / trials]])
-    grouped = model.loss(logits, label, torch.tensor([False])).mean()
-    outcomes = torch.tensor([1.] * successes + [0.] * (trials - successes))
-    individual = torch.nn.functional.binary_cross_entropy_with_logits(logits.squeeze(0).expand(trials), outcomes)
-    torch.testing.assert_close(grouped, individual)
-    torch.testing.assert_close(torch.autograd.grad(grouped, logits)[0], torch.autograd.grad(individual, logits)[0])
-    nll, brier = outcome_scores(logits.detach().numpy(), label.numpy())
-    individual_nll, individual_brier = outcome_scores(np.full(trials, 0.7), outcomes.numpy())
-    np.testing.assert_allclose(nll, individual_nll.mean(), rtol=1e-6)
-    np.testing.assert_allclose(brier, individual_brier.mean(), rtol=1e-6)

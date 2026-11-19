@@ -6,21 +6,21 @@ import numpy as np
 from scipy.special import expit
 from transformers import EvalPrediction
 
+from critic_only.constants import INPUT_PREFIX_BLOCKS
+
 
 def outcome_scores(logits: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return elementwise stable NLL and Brier for checkpoint predictions.
 
-    Binary labels give standard outcome scores. Fractional labels are also supported: the variance term makes Brier equal the mean score against the underlying binary outcomes.
-
     Args:
         logits: Predicted success logits with arbitrary matching dimensions.
-        labels: Matching correctness targets, each in [0, 1].
+        labels: Matching binary correctness grades at the requested checkpoints.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: Negative log-likelihood and Brier scores with the input shape; lower is better.
     """
     nll = labels * np.logaddexp(0, -logits) + (1 - labels) * np.logaddexp(0, logits)
-    return nll, (expit(logits) - labels) ** 2 + labels * (1 - labels)
+    return nll, (expit(logits) - labels) ** 2
 
 
 def compute_metrics(prediction: EvalPrediction, problem_keys: list[str]) -> dict[str, float]:
@@ -53,8 +53,8 @@ def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list
     if len(problem_keys) != len(logits) or len(labels) != len(logits):
         raise ValueError("evaluation problem identities, predictions, and labels must have equal lengths")
     if (logits.ndim != 2 or logits.shape[1] == 0 or len(logits) == 0 or labels.shape != logits.shape or not np.isfinite(logits).all()
-            or not np.isfinite(labels).all() or ((labels < 0) | (labels > 1)).any()):
-        raise ValueError("evaluation requires finite checkpoint curves and targets in [0, 1]")
+            or not ((labels == 0) | (labels == 1)).all()):
+        raise ValueError("evaluation requires finite checkpoint curves and exact binary grades")
     nll, brier = outcome_scores(logits, labels)
     identities = np.asarray(problem_keys)
     per_problem = []
@@ -67,6 +67,6 @@ def evaluation_report(logits: np.ndarray, labels: np.ndarray, problem_keys: list
     return {"problems": len(per_problem), "prefixes": len(problem_keys),
             "terminal_nll": float(mean_nll[-1]), "terminal_brier": float(mean_brier[-1]),
             "curve_nll": float(mean_nll.mean()), "curve_brier": float(mean_brier.mean()),
-            "checkpoints": [{"block": index + 2, "nll": float(nll_score), "brier": float(brier_score)}
+            "checkpoints": [{"block": index + INPUT_PREFIX_BLOCKS + 1, "nll": float(nll_score), "brier": float(brier_score)}
                             for index, (nll_score, brier_score) in enumerate(zip(mean_nll, mean_brier))],
             "per_problem": per_problem}

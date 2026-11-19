@@ -185,9 +185,9 @@ def test_input_signature_separates_reference_only_runs() -> None:
     """Old paired-view checkpoints must not resume under the reference-only objective."""
     manifest = {"tokenization": {"model": "fixture", "rows": 4}}
     paired_signature = hashlib.sha256(json.dumps(manifest["tokenization"], sort_keys=True).encode()).hexdigest()
-    reference_signature = input_signature(manifest, "lora")
+    reference_signature = input_signature(manifest)
     assert reference_signature != paired_signature
-    assert input_signature({**manifest, "features": {"rows": 4}}, "lora") == reference_signature
+    assert input_signature({**manifest, "features": {"rows": 4}}) == reference_signature
 
 
 def test_legacy_processed_audits_cannot_supply_labels(prepared_inputs: CollectionFixture) -> None:

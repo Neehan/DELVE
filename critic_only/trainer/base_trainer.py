@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 from transformers import Trainer
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
-from transformers.trainer_callback import PrinterCallback, ProgressCallback
+from transformers.trainer_callback import PrinterCallback
 
 from critic_only.constants import TRAINING_ARGS_FILENAME
 from critic_only.models.base_critic import BaseCritic
@@ -40,8 +40,8 @@ class BaseTrainer(Trainer):
         # Request the total label count so uneven microbatches retain equal per-prefix weight.
         self.model_accepts_loss_kwargs = True
         self.args.disable_tqdm = True
+        # Our log() prints metrics as JSON; disable HF's printer to avoid duplicate console logs.
         self.remove_callback(PrinterCallback)
-        self.remove_callback(ProgressCallback)
 
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
         """Print and save the latest metrics so progress survives a job cancellation.
@@ -70,34 +70,71 @@ class BaseTrainer(Trainer):
 
         Args:
             model: Critic, possibly wrapped in DDP.
-            inputs: Tokens or endpoint vectors, checkpoint labels [B,H-1], oracle flags and aligned budgets.
+            inputs: Tokens, solver masks, checkpoint labels [B,H-1], oracle flags and aligned budgets.
             *args: Hugging Face may pass return_outputs as the first positional argument.
             **kwargs: num_items_in_batch counts all checkpoint labels across the accumulated batch;
                 return_outputs requests endpoint curves for evaluation.
 
         Returns:
             Tensor: BCE averaged over horizons and solver tokens, then trajectories. With return_outputs,
-            also returns endpoint logits [B,H-1]. Best-checkpoint selection still uses final-deadline NLL.
+            also returns endpoint logits [B,H-1]. Best-checkpoint selection still uses final-checkpoint NLL.
         """
         logits = model(inputs=inputs["inputs"], oracle=inputs["oracle"], remaining_blocks=inputs["remaining_blocks"])
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
-        losses = critic.loss(logits, inputs["labels"], inputs["oracle"])
-        losses = losses.mean(dim=-1)
-        if logits.ndim == 3:
-            mask = inputs["inputs"]["solver_mask"]
-            # Equal weight per horizon and per trajectory, independent of the number of solver tokens.
-            losses = (losses * mask).sum(dim=-1) / mask.sum(dim=-1)
-            positions = inputs["inputs"]["attention_mask"].sum(dim=-1) - 1
-            logits = logits[torch.arange(len(positions), device=positions.device), positions]
-        label_count = kwargs.get("num_items_in_batch")
-        # HF counts every entry of [B,H-1]; convert its accumulated label count to a trajectory count.
-        prefix_count = None if label_count is None else label_count / inputs["labels"].shape[-1]
-        loss = losses.mean() if prefix_count is None else losses.sum() / prefix_count
-        if prefix_count is not None and self.args.average_tokens_across_devices:
-            # DDP averages rank gradients; undo that average when dividing by the global prefix count.
-            loss = loss * self.accelerator.num_processes
+        checkpoint_losses = critic.loss(logits, inputs["labels"], inputs["oracle"])
+        trajectory_losses = self._mean_trajectory_losses(checkpoint_losses, inputs["inputs"])
+        loss = self._normalize_batch_loss(
+            trajectory_losses, inputs["labels"].shape[-1], kwargs.get("num_items_in_batch")
+        )
         return_outputs = args[0] if args else kwargs.get("return_outputs", False)
-        return (loss, {"logits": logits}) if return_outputs else loss
+        if not return_outputs:
+            return loss
+        # Endpoint metrics ask: given the complete 1× prefix, how accurately do we predict 2×–5× outcomes?
+        # Earlier solver tokens provide additional loss supervision; best-checkpoint selection uses endpoint final-outcome NLL.
+        endpoint_positions = inputs["inputs"]["attention_mask"].sum(dim=-1) - 1
+        batch_indices = torch.arange(len(endpoint_positions), device=logits.device)
+        logits = logits[batch_indices, endpoint_positions]
+        return loss, {"logits": logits}
+
+    def _mean_trajectory_losses(
+        self, checkpoint_losses: Tensor, model_inputs: dict[str, Tensor]
+    ) -> Tensor:
+        """Average checkpoints and solver tokens so each trajectory has one loss.
+
+        Args:
+            checkpoint_losses: Unreduced BCE [B,L,C] at every token and checkpoint.
+            model_inputs: Inputs include solver_mask [B,L], excluding instructions and padding.
+
+        Returns:
+            Tensor: Losses [B], with equal weight per trajectory regardless of its token count.
+        """
+        # First average checkpoint targets: [B,L,C] becomes [B,L].
+        checkpoint_mean = checkpoint_losses.mean(dim=-1)
+        solver_mask = model_inputs["solver_mask"]
+        return (checkpoint_mean * solver_mask).sum(dim=-1) / solver_mask.sum(dim=-1)
+
+    def _normalize_batch_loss(
+        self, trajectory_losses: Tensor, num_checkpoints: int, checkpoint_label_count: Tensor | int | None
+    ) -> Tensor:
+        """Scale this microbatch's loss for gradient accumulation and distributed training.
+
+        Args:
+            trajectory_losses: One mean loss per trajectory in this microbatch.
+            num_checkpoints: Number of labels per trajectory.
+            checkpoint_label_count: HF's total label count across accumulated microbatches, or None for evaluation.
+
+        Returns:
+            Tensor: Scalar loss whose accumulated gradients weight every trajectory equally.
+        """
+        if checkpoint_label_count is None:
+            return trajectory_losses.mean()
+        # HF counts every entry of [B,C]; divide by C to count trajectories, including uneven microbatches.
+        trajectory_count = checkpoint_label_count / num_checkpoints
+        loss = trajectory_losses.sum() / trajectory_count
+        if self.args.average_tokens_across_devices:
+            # DDP averages rank gradients; undo that average when dividing by the global trajectory count.
+            loss = loss * self.accelerator.num_processes
+        return loss
 
     def _save(self, *args: Any, **kwargs: Any) -> None:
         """Save trainable critic weights and settings; Trainer saves optimizer state separately.

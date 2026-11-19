@@ -1,4 +1,4 @@
-"""Construct a cached-vector critic, a live frozen-Qwen head, or a full/LoRA critic."""
+"""Construct Qwen and a critic head for head-only, full, or LoRA training."""
 
 from typing import cast
 
@@ -15,39 +15,38 @@ from critic_only.models.ppo_critic import PPOCritic
 
 
 def create_critic(settings: CriticConfig, cpu: bool) -> BaseCritic:
-    """Build prediction heads and attach Qwen when training on tokens.
+    """Build prediction heads and attach Qwen for all-token supervision.
 
-    Frozen mode loads no Qwen weights. Head mode freezes live Qwen and trains only the MLP. LoRA adapts selected final layers. Full mode trains all parameters in selected final blocks and freezes the rest, including the output normalization. Trainer handles device placement and BF16 autocast; trainable full-block weights remain FP32.
+    Every mode trains the shared MLP and prediction heads on all solver tokens. Head mode freezes Qwen; LoRA adapts selected final layers; full mode trains all parameters in selected final blocks and freezes the rest, including the output normalization. Trainer handles device placement and BF16 autocast; trainable full-block weights remain FP32.
 
     Args:
         settings: Critic variant, dimensions, input-cache identity, and training-mode settings.
-        cpu: Use FP32/SDPA for CPU execution or BF16/FlashAttention-2 for GPU execution. Frozen MLP construction is unaffected.
+        cpu: Use FP32/SDPA for CPU execution or BF16/FlashAttention-2 for GPU execution.
 
     Returns:
         BaseCritic: Fresh PPOCritic, PPOOracleCritic, or DECritic; call load_from_weights to restore trained weights.
     """
     classes = {"ppo-critic": PPOCritic, "ppo-oracle-critic": PPOOracleCritic, "de-critic": DECritic}
     critic = classes[settings.variant](settings)
-    if settings.training_mode != "frozen":
-        model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
-                                          dtype=torch.float32 if cpu else torch.bfloat16,
-                                          attn_implementation=CPU_ATTENTION if cpu else DEFAULT_ATTENTION)
-        model.config.use_cache = False
-        if settings.training_mode == "head":
-            critic.language_model = model.requires_grad_(False)
-            return critic
-        first_trainable_layer = max(0, model.config.num_hidden_layers - cast(int, settings.trainable_layers))
-        if settings.training_mode == "lora":
-            critic.language_model = get_peft_model(model, adapter_config(settings, first_trainable_layer))
-        else:
-            model.requires_grad_(False)
-            # FP32 trainable weights retain small updates while autocast keeps matrix products in BF16.
-            for layer_index in range(first_trainable_layer, model.config.num_hidden_layers):
-                model.get_submodule(f"layers.{layer_index}").float().requires_grad_(True)
-            critic.language_model = model
-        # Non-reentrant checkpointing supports gradients in selected blocks without embedding-output gradients.
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        model.disable_input_require_grads()
+    model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
+                                      dtype=torch.float32 if cpu else torch.bfloat16,
+                                      attn_implementation=CPU_ATTENTION if cpu else DEFAULT_ATTENTION)
+    model.config.use_cache = False
+    if settings.training_mode == "head":
+        critic.language_model = model.requires_grad_(False)
+        return critic
+    first_trainable_layer = max(0, model.config.num_hidden_layers - cast(int, settings.trainable_layers))
+    if settings.training_mode == "lora":
+        critic.language_model = get_peft_model(model, adapter_config(settings, first_trainable_layer))
+    else:
+        model.requires_grad_(False)
+        # FP32 trainable weights retain small updates while autocast keeps matrix products in BF16.
+        for layer_index in range(first_trainable_layer, model.config.num_hidden_layers):
+            model.get_submodule(f"layers.{layer_index}").float().requires_grad_(True)
+        critic.language_model = model
+    # Non-reentrant checkpointing supports gradients in selected blocks without embedding-output gradients.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.disable_input_require_grads()
     return critic
 
 

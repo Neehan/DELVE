@@ -8,7 +8,7 @@ The critic observes the first 1× of a frozen solver’s trajectory and predicts
 
 Training labels come from continuing the same self-refinement harness and grading that answer: 1 if correct, 0 otherwise. Critiques cannot replace it, and an unfinished box leaves the previous complete answer in force. A later complete wrong answer still replaces an earlier correct one.
 
-[Critic-only experiments](critic_only/README.md) compare unrestricted and discovery–execution value curves. The default fully tunes the last eight Qwen layers with a randomly initialized MLP; LoRA, live frozen-Qwen and cached-endpoint baselines remain available.
+[Critic-only experiments](critic_only/README.md) compare unrestricted and discovery–execution value curves. All training modes use the same token inputs and all-token loss: `head` freezes Qwen, `lora` trains adapters, and `full` tunes selected Qwen layers. Every mode trains the shared MLP and prediction heads. Reported validation metrics use the complete 1× prefix; the default fully tunes the last eight Qwen layers.
 
 **Environment**
 

@@ -1,4 +1,4 @@
-"""Save tokenized critic inputs as Parquet chunks and read them for Qwen encoding or LoRA training."""
+"""Save tokenized critic inputs as Parquet chunks and read them for all-token training."""
 
 from collections.abc import Iterable
 from pathlib import Path
@@ -16,7 +16,7 @@ from discovery_execution.processing.storage import file_digest, load_parquet_spl
 class CriticInputStorage:
     """Own the saved token inputs and tokenizer.
 
-    save_inputs writes chunks by split. read_chunk checks and loads one chunk for encoding; load_splits opens partitions for LoRA. load_tokenizer and load_metadata restore the saved tokenizer and settings.
+    save_inputs writes chunks by split. read_chunk checks one chunk; load_splits opens partitions for training. load_tokenizer and load_metadata restore the saved tokenizer and settings.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -31,10 +31,10 @@ class CriticInputStorage:
         self.directory = directory
 
     def load_metadata(self) -> dict[str, Any]:
-        """Read model, token, and hidden-state settings from manifest.json.
+        """Read model and token settings from manifest.json.
 
         Returns:
-            dict[str, Any]: Current model, input, and optional hidden-state metadata.
+            dict[str, Any]: Model and prepared-input metadata.
         """
         manifest = read_manifest(self.directory)
         if manifest["tokenization"]["settings"].get("target") != CRITIC_TARGET:
