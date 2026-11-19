@@ -13,7 +13,7 @@ class PreparationConfig(BaseModel):
 
     Fields:
         source_directory: Processed model directory containing full trajectory chunks.
-        horizon: Required final solver budget in blocks, measured from the problem start.
+        horizon: Final training checkpoint in analysis blocks; source generation may continue longer.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -45,7 +45,7 @@ class InputPrefix(BaseModel):
         problem_key: Competition/year/problem ID used for splitting and scoring.
         remaining_blocks: Solver budget left after the observed history.
         split: Fixed train, validation, or test assignment for this problem.
-        messages: Exact saved history through the first block, including a hint when present.
+        messages: History through the first analysis checkpoint, including a hint when present.
         solution_index: Reference solution selected to match the sketch or source-seed round robin.
         reference_solution: Optional full solution supplied only to the critic.
         branch: This trajectory’s checkpoint outcomes and identity, never included in the prompt.

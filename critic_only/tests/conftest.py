@@ -20,6 +20,7 @@ from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
 from critic_only.tests.models import CollectionFixture
 from critic_only.models.models import CriticConfig
 from critic_only.constants import CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH
+from discovery_execution.processing.constants import CHECKPOINT_INTERVAL_TOKENS
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +42,7 @@ def tokenizer() -> PreTrainedTokenizerFast:
 @pytest.fixture
 def encoding_settings() -> dict[str, Any]:
     """Freeze prompt text and the token limit exactly as setup records them."""
-    return {"horizon": 3, "max_length": 512, "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
+    return {"checkpoint_interval_tokens": CHECKPOINT_INTERVAL_TOKENS, "horizon": 3, "max_length": 512, "critic_prompt": CRITIC_PROMPT_PATH.read_text().strip(),
             "reference_prompt": REFERENCE_PROMPT_PATH.read_text().strip()}
 
 
@@ -88,8 +89,9 @@ def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[st
 
 
 @pytest.fixture
-def prepared_inputs(tmp_path: Path) -> CollectionFixture:
+def prepared_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CollectionFixture:
     """Save root and forked runs with distinct observed reasoning and later correct-to-incorrect revisions."""
+    monkeypatch.setattr("critic_only.data.critic_input_processor.DEFAULT_BLOCKS", 3)
     root = tmp_path / "outputs"
     references = tmp_path / "datasets" / "aime"
     references.mkdir(parents=True)

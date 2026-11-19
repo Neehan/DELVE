@@ -12,11 +12,17 @@ from unittest.mock import Mock
 import pyarrow as pa
 import pytest
 import torch
+import zstandard
 from safetensors.torch import load_file
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
+from critic_only.data.critic_batcher import CriticBatcher
+from critic_only.models.loader import create_critic
+from discovery_execution.audit.constants import GRADING_RULE
 from critic_only.constants import CRITIC_TARGET
+from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
+from discovery_execution.processing.constants import CHECKPOINT_INTERVAL_TOKENS
 from critic_only.cli import evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
@@ -62,7 +68,7 @@ def save_token_inputs(root: Path, settings: CriticConfig, rows: list[dict[str, A
         path = root / split / "critic_only" / "tokenized" / "part-00000.parquet"
         write_parquet_atomic(path, pa.Table.from_pylist(values))
         checksums[str(path.relative_to(root))] = file_digest(path)
-    tokenization = {"settings": {"target": CRITIC_TARGET, "model": settings.model, "revision": settings.revision,
+    tokenization = {"settings": {"target": CRITIC_TARGET, "checkpoint_interval_tokens": CHECKPOINT_INTERVAL_TOKENS, "model": settings.model, "revision": settings.revision,
                                 "horizon": settings.horizon, "hidden_size": settings.input_size},
                     "complete": True, "shards": checksums}
     write_json_atomic(root / "manifest.json", {"tokenization": tokenization})
@@ -122,6 +128,7 @@ def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable
     api = Mock(); api.model_info.return_value.sha = "local"
     monkeypatch.setattr(setup, "HfApi", Mock(return_value=api))
     monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
+    monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", OUTPUT_TOKENS_PER_BLOCK)
     monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
     monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(prepared_inputs.outputs_directory),
         "--datasets-directory", str(prepared_inputs.datasets_directory), "--destination", str(root), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
@@ -131,6 +138,17 @@ def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable
     assert not (root / "tiny" / "train" / "critic_only" / "hidden_states").exists()
     manifest = json.loads((root / "tiny" / "manifest.json").read_text())
     assert manifest["tokenization"]["complete"]
+    api.model_info.assert_called_once()
+    raw_hashes = manifest["trajectories"]
+    split_hash = file_digest(root / "splits.parquet")
+    monkeypatch.setattr("sys.argv", ["setup", "--reprocess", "--destination", str(root),
+        "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
+    setup.main()
+    rebuilt = json.loads((root / "tiny" / "manifest.json").read_text())
+    assert rebuilt == manifest
+    assert all(file_digest(root / "tiny" / name) == digest for name, digest in raw_hashes.items())
+    assert file_digest(root / "splits.parquet") == split_hash
+    assert len(list((root / "tiny").glob("checkpoints-*.parquet"))) == 1
     api.model_info.assert_called_once()
 
 
@@ -283,3 +301,72 @@ def test_cached_mode_rejected_before_loading(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(SystemExit):
         train.main()
     loader.assert_not_called()
+
+
+def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokenizer: PreTrainedTokenizerFast,
+    critic_settings: Callable[[str], CriticConfig], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Smoke the finer-cut setup through native head/full/LoRA forward and backward, using tiny token units."""
+    from_path = prepared_inputs.outputs_directory
+    root = prepared_inputs.destination.parent / "finer"
+    sources = root / "raw"
+    for module in ("discovery_execution.processing.trajectory_processor", "critic_only.data.critic_input_processor",
+                   "discovery_execution.processing.checkpoint_reconstructor"):
+        monkeypatch.setattr(f"{module}.OUTPUT_TOKENS_PER_BLOCK", 8)
+    for path in from_path.rglob("meta.json"):
+        metadata = json.loads(path.read_text())
+        if metadata["experiment"] not in ("unaided", "oracle-execution"):
+            continue
+        directory = sources / path.parent.relative_to(from_path)
+        write_tiny_source(directory, metadata)
+    settings = critic_settings("ppo-critic")
+    tokenizer.save_pretrained(settings.model)
+    api = Mock(); api.model_info.return_value.sha = "local"
+    monkeypatch.setattr(setup, "HfApi", Mock(return_value=api))
+    monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
+    monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
+    monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", 4)
+    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(sources), "--destination", str(root / "processed"),
+        "--datasets-directory", str(prepared_inputs.datasets_directory), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
+    setup.main()
+    directory = root / "processed" / "tiny"
+    manifest = json.loads((directory / "manifest.json").read_text())
+    boundaries = Dataset.from_parquet(str(directory / manifest["analysis_checkpoints"]["path"]))
+    assert len(boundaries) == 32 and all(len(row["checkpoints"]) == 6 for row in boundaries.to_list())
+    token_shard = next(iter(manifest["tokenization"]["shards"]))
+    rows = Dataset.from_parquet(str(directory / token_shard)).select(range(2)).to_list()
+    assert all(row["labels"] == [1, 1] for row in rows)
+    assert all(row["prefix_id"].endswith("checkpoint_4tokens") for row in rows)
+    for mode in ("head", "lora", "full"):
+        model_settings = settings.model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "head" else 1,
+            "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
+        critic = create_critic(model_settings, True)
+        batch = CriticBatcher(tokenizer)(rows)
+        logits = critic(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+        loss = critic.loss(logits, batch["labels"], batch["oracle"])
+        assert torch.isfinite(loss).all()
+        (loss.mean(-1) * batch["inputs"]["solver_mask"]).sum().backward()
+        assert any(parameter.grad is not None for parameter in critic.parameters() if parameter.requires_grad)
+
+
+def write_tiny_source(directory: Path, metadata: dict[str, Any]) -> None:
+    """Write three eight-token generation requests; their four-token midpoint cuts are reproducible."""
+    directory.mkdir(parents=True)
+    messages = [{"role": "user", "content": "Find the number."}]
+    if metadata["experiment"] == "oracle-execution":
+        messages.append({"role": "user", "content": "Use symmetry."})
+    messages.append({"role": "assistant", "content": ""})
+    checkpoints, requests = [], []
+    for block in range(1, 4):
+        messages[-1]["content"] += f"\\boxed{{{block % 2}}} word word word "
+        checkpoints.append({"output_tokens": block * 8, "message_count": len(messages), "last_message_chars": len(messages[-1]["content"])})
+        requests.append({"output_tokens": block * 8, "usage": {"completion_tokens": 8}, "finish_reason": "length",
+                         "injected": metadata["experiment"] == "oracle-execution"})
+        snapshot = {"output_tokens": block * 8, "messages": messages}
+        (directory / f"checkpoint_{block}x.json.zst").write_bytes(zstandard.compress(json.dumps(snapshot).encode()))
+    state = {"output_tokens": 24, "messages": messages, "requests": requests, "checkpoints": checkpoints,
+             "phase": "solve", "injected": metadata["experiment"] == "oracle-execution", "response_finished": False}
+    audit = {"grading_rule": GRADING_RULE, "complete": True, "output_tokens": 24,
+             "checkpoints": {f"{block}x": {"correctness": {"score": block % 2}} for block in range(1, 4)}}
+    (directory / "meta.json").write_text(json.dumps(metadata))
+    (directory / "audit.json").write_text(json.dumps(audit))
+    (directory / "conversation.json.zst").write_bytes(zstandard.compress(json.dumps(state).encode()))
