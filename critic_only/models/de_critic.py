@@ -1,75 +1,145 @@
-"""Predict final answer correctness by combining strategy discovery and execution probabilities."""
+"""Predict exact checkpoint correctness through shared discovery and execution components."""
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from critic_only.constants import VALUE_OUTPUT_SIZE
+from critic_only.constants import INPUT_PREFIX_BLOCKS, VALUE_OUTPUT_SIZE
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.models import CriticConfig
 
 
 class DECritic(BaseCritic):
-    """Estimate success by separating strategy discovery from strategy execution.
+    """Predict checkpoint correctness from strategy discovery and execution.
 
-    The heads predict s, the probability a strategy is already discovered; alpha, the probability of discovering one per future block; and epsilon_r, success given a strategy and r remaining blocks. Unaided success is s*epsilon_r + (1-s)*sum_{j=1}^r alpha*(1-alpha)^(j-1)*epsilon_(r-j+1). Oracle histories use epsilon_r alone. These components are learned from final correctness labels, not explicit strategy labels. Epsilon may decrease because later revisions can spoil an answer.
+    At each token, predict estimates alpha (discovery probability per block) and epsilon_r (correctness after r execution blocks). With r blocks left, unaided value is sum_{d=0}^{r-1} alpha*(1-alpha)^d*epsilon_(r-d). Oracle histories use epsilon_r directly because the sketch supplies a strategy.
 
-    predict implements this mixture in log space at the observed endpoint only. Token-level Monte Carlo supervision is confined to PPO variants; BaseCritic supplies the MLP, forward pass, loss and checkpoints.
+    Execution probabilities need not increase with budget: later revisions can spoil an answer. BaseCritic supplies Qwen, the shared MLP, loss and checkpoint storage; this class implements predict and the discovery-time sum.
     """
 
+    execution_blocks: Tensor
+    blocks_before_discovery: Tensor
+    target_checkpoints: Tensor
+
     def __init__(self, settings: CriticConfig) -> None:
-        """Add heads for strategy discovery and execution to the shared MLP.
+        """Create one discovery head and one execution logit per whole-block remaining budget.
 
         Args:
-            settings: hidden_size sets head input width; horizon - 1 sets the number of future execution budgets.
+            settings: MLP width and total solver horizon. Interior first-block tokens need budgets up to H.
 
         Returns:
             None.
         """
         super().__init__(settings)
-        self.horizons = settings.horizon - 1
-        self.strategy_discovered = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
-        self.discovery = nn.Linear(settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32)
-        self.execution = nn.Linear(settings.hidden_size, self.horizons, dtype=torch.float32)
+        self.discovery = nn.Linear(
+            settings.hidden_size, VALUE_OUTPUT_SIZE, dtype=torch.float32
+        )
+        self.execution = nn.Linear(
+            settings.hidden_size, settings.horizon, dtype=torch.float32
+        )
 
-    def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
-        """Combine discovery and execution probabilities into one final-success logit.
+        # Buffers are fixed tensors that PyTorch moves to the GPU with the model; they are not learned.
+        execution_blocks = torch.arange(1, settings.horizon + 1)
+        self.register_buffer("execution_blocks", execution_blocks, persistent=False)
+        # With 3 blocks left: 3 execution blocks means delay 0; 2 means delay 1; 1 means delay 2.
+        self.register_buffer(
+            "blocks_before_discovery",
+            execution_blocks[:, None] - execution_blocks,
+            persistent=False,
+        )
+        # The four prediction targets are correctness at total compute 2×, 3×, 4× and 5×.
+        self.register_buffer(
+            "target_checkpoints",
+            torch.arange(INPUT_PREFIX_BLOCKS + 1, settings.horizon + 1),
+            persistent=False,
+        )
 
-        Unaided rows use the mixture defined in the class docstring. Oracle rows use epsilon_r alone. Log-space calculation avoids underflow in small probabilities.
+    def predict(
+        self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor
+    ) -> Tensor:
+        """Build the DE value curve, then select the requested checkpoint predictions.
 
         Args:
-            hidden: MLP outputs [N, hidden_size], one per input prefix.
-            oracle: Solver-sketch flags [N]. True selects execution alone; a critic-only reference does not set this flag.
-            remaining_blocks: Future budget [N], from 1 to self.horizons; selects epsilon_r and limits discovery delays.
+            hidden: Shared MLP outputs [B,L,D] for all tokens.
+            oracle: Solver-hint flags [B]; critic-only references do not count as hints.
+            remaining_blocks: Blocks until the final checkpoint, [B,L].
 
         Returns:
-            Tensor: Float32 log(success) - log(failure) [N]. Sigmoid gives final-success probability.
+            Tensor: FP32 logits [B,L,C], with C=num_checkpoints (four for 2×–5×).
         """
-        # Compute log probabilities in FP32 even when the model and heads run under BF16 autocast.
-        strategy_discovered_logits = self.strategy_discovered(hidden).float().squeeze(-1)
-        log_strategy_discovered = F.logsigmoid(strategy_discovered_logits)
-        log_strategy_not_discovered = F.logsigmoid(-strategy_discovered_logits)
-        alpha_logits = self.discovery(hidden).float().squeeze(-1)
+        discovery_logits = self.discovery(hidden).float()
         execution_logits = self.execution(hidden).float()
-        log_alpha = F.logsigmoid(alpha_logits)
-        log_no_discovery = F.logsigmoid(-alpha_logits)
-        steps = torch.arange(self.horizons, device=hidden.device)
-        delays = remaining_blocks[:, None] - 1 - steps
+        unaided_curve = self._compute_unaided_curve(discovery_logits, execution_logits)
+        # One oracle flag per history applies to every token and every remaining budget.
+        oracle_mask = oracle.reshape((-1,) + (1,) * (execution_logits.ndim - 1))
+        # Oracle supplies the strategy: use epsilon directly.
+        value_curve = torch.where(oracle_mask, execution_logits, unaided_curve)
+        return self._select_checkpoints(value_curve, remaining_blocks)
 
-        # Discovery after a delay has weight alpha * (1 - alpha)^delay; exclude unreachable execution horizons.
-        log_weights = log_alpha[:, None] + delays.clamp_min(0) * log_no_discovery[:, None]
-        log_weights = log_weights.masked_fill(delays < 0, -torch.inf)
-        log_search_success = torch.logsumexp(log_weights + F.logsigmoid(execution_logits), dim=-1)
-        log_acquired_failure = torch.logsumexp(log_weights + F.logsigmoid(-execution_logits), dim=-1)
+    def _compute_unaided_curve(
+        self,
+        discovery_logits: Tensor,
+        execution_logits: Tensor,
+    ) -> Tensor:
+        """Compute unaided success logits from geometric discovery followed by execution.
 
-        # Failure also includes no discovery before the budget ends: (1 - alpha)^remaining_blocks.
-        log_search_failure = torch.logaddexp(remaining_blocks * log_no_discovery, log_acquired_failure)
-        terminal_execution = execution_logits.gather(-1, (remaining_blocks - 1).unsqueeze(-1)).squeeze(-1)
+        Args:
+            discovery_logits: Logits of discovering a strategy per future block, [...,1].
+            execution_logits: Logits of correct execution with 1 through H blocks, [...,H].
 
-        # A discovered strategy goes directly to execution; otherwise mix over future discovery times.
-        log_success = torch.logaddexp(log_strategy_discovered + F.logsigmoid(terminal_execution),
-                                     log_strategy_not_discovered + log_search_success)
-        log_failure = torch.logaddexp(log_strategy_discovered + F.logsigmoid(-terminal_execution),
-                                     log_strategy_not_discovered + log_search_failure)
-        # Oracle histories use only epsilon's logit; unaided histories use the combined discovery-execution logit.
-        return torch.where(oracle, terminal_execution, log_success - log_failure)
+        Returns:
+            Tensor: Unaided value logits [...,H] for 1 through H remaining blocks, before checkpoint selection.
+        """
+        log_discovery = F.logsigmoid(
+            discovery_logits
+        )  # log(alpha): discover in this block.
+        log_no_discovery = F.logsigmoid(
+            -discovery_logits
+        )  # log(1-alpha): no discovery in this block.
+        # With r blocks left and k execution blocks, d=r-k blocks pass before discovery.
+        # The added axis broadcasts each token's discovery rate across all (r, k) combinations.
+        log_discovery_weights = (
+            log_discovery[..., None]  # log(alpha): discovery after the wait.
+            + self.blocks_before_discovery.clamp_min(0)
+            * log_no_discovery[..., None]  # d * log(1-alpha): the wait.
+        )
+        # Negative delays mean k > r: clamp above only for arithmetic, then assign probability zero.
+        log_discovery_weights = log_discovery_weights.masked_fill(
+            self.blocks_before_discovery < 0, -torch.inf
+        )
+        # log(sum_k alpha*(1-alpha)^(r-k)*epsilon_k): add log execution success, then sum over k.
+        log_success_after_discovery = torch.logsumexp(
+            log_discovery_weights + F.logsigmoid(execution_logits)[..., None, :], dim=-1
+        )
+        # Same discovery weights, but multiply by execution failure (1-epsilon_k).
+        log_failure_after_discovery = torch.logsumexp(
+            log_discovery_weights + F.logsigmoid(-execution_logits)[..., None, :],
+            dim=-1,
+        )
+        log_never_discovered = (
+            self.execution_blocks * log_no_discovery
+        )  # log((1-alpha)^r): no discovery by r.
+        # logaddexp adds probabilities: never discover OR discover and execute incorrectly.
+        log_discovery_execution_failure = torch.logaddexp(
+            log_never_discovered, log_failure_after_discovery
+        )
+        # log(p) - log(1-p) gives logits without rounding small probabilities to zero.
+        return log_success_after_discovery - log_discovery_execution_failure
+
+    def _select_checkpoints(
+        self, value_curve: Tensor, remaining_blocks: Tensor
+    ) -> Tensor:
+        """Map remaining-budget values to absolute target checkpoints 2× through H×.
+
+        Args:
+            value_curve: Value logits [...,H], indexed by 1 through H remaining blocks.
+            remaining_blocks: Blocks left until H×, aligned with the leading dimensions of value_curve.
+
+        Returns:
+            Tensor: Checkpoint logits [...,C]. At the 1× endpoint select budgets 1–4; earlier tokens use the agreed rounded-up budgets 2–5 for H=5.
+        """
+        checkpoint_offsets = self.settings.horizon - self.target_checkpoints
+        remaining_blocks_per_checkpoint = (
+            remaining_blocks[..., None] - checkpoint_offsets
+        )
+        return value_curve.gather(-1, remaining_blocks_per_checkpoint - 1)

@@ -4,11 +4,11 @@ Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` ha
 
 Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
-The critic observes the first 1× of a frozen solver’s trajectory and predicts whether its final answer at 5× will be correct. It receives a reference solution and the total budget; training supervises each solver token without exposing future reasoning or endpoint metadata.
+The critic observes the first 1× of a frozen solver’s trajectory and predicts exact answer correctness at checkpoints 2×–5×. It receives a reference solution and the total budget; all variants supervise every solver token without exposing future reasoning or labels.
 
 Training labels come from continuing the same self-refinement harness and grading that answer: 1 if correct, 0 otherwise. Critiques cannot replace it, and an unfinished box leaves the previous complete answer in force. A later complete wrong answer still replaces an earlier correct one.
 
-[Critic-only experiments](critic_only/README.md) first train an MLP on frozen Qwen token states, then optionally fine-tune the final Qwen layers with that trained head. Cached-endpoint and DE baselines remain available.
+[Critic-only experiments](critic_only/README.md) compare unrestricted and discovery–execution value curves. All training modes use the same token inputs and all-token loss: `head` freezes Qwen, `lora` trains adapters, and `full` tunes selected Qwen layers. Every mode trains the shared MLP and prediction heads. Reported validation metrics use the complete 1× prefix; the default fully tunes the last eight Qwen layers.
 
 **Environment**
 

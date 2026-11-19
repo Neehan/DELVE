@@ -18,10 +18,10 @@ class CriticConfig(BaseModel):
         input_size: Number of values in one Qwen hidden vector.
         hidden_size: Width of both GELU MLP layers and input width of the prediction heads.
         data_signature: Hash of the prepared input cache, checked when resuming.
-        training_mode: frozen reads cached vectors; head runs frozen Qwen on tokens; lora/full adapt selected final blocks.
+        training_mode: head runs frozen Qwen on tokens; lora/full adapt selected final blocks.
         lora_rank: Adapter rank in LoRA mode; None otherwise.
         lora_alpha: Adapter scaling numerator (scale = alpha/rank); unrelated to DE alpha. None outside LoRA mode.
-        trainable_layers: Number of final blocks to train in LoRA/full modes, capped at model depth; None in frozen/head modes.
+        trainable_layers: Number of final blocks to train in LoRA/full modes, capped at model depth; None in head mode.
         oracle_weight: Loss multiplier for solver histories containing sketches; unaided weight is one.
 
     validate_training_settings checks that layer and adapter options match training_mode. The configuration is saved with each checkpoint.
@@ -35,7 +35,7 @@ class CriticConfig(BaseModel):
     input_size: int = Field(gt=0)
     hidden_size: int = Field(gt=0)
     data_signature: str
-    training_mode: Literal["frozen", "head", "lora", "full"]
+    training_mode: Literal["head", "lora", "full"]
     lora_rank: int | None = Field(gt=0)
     lora_alpha: int | None = Field(gt=0)
     trainable_layers: int | None = Field(default=None, gt=0)
@@ -53,8 +53,8 @@ class CriticConfig(BaseModel):
         if self.training_mode != "lora" and any(value is not None for value in
                                                  (self.lora_rank, self.lora_alpha)):
             raise ValueError("adapter settings require LoRA mode")
-        if self.training_mode in ("frozen", "head") and self.trainable_layers is not None:
-            raise ValueError("frozen/head critics do not use trainable layers")
+        if self.training_mode == "head" and self.trainable_layers is not None:
+            raise ValueError("head critics do not use trainable layers")
         if self.training_mode in ("lora", "full") and self.trainable_layers is None:
             raise ValueError("LoRA and full training require trainable_layers")
         return self

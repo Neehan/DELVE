@@ -1,4 +1,4 @@
-"""Define the input history, matching reference solution, and final label used before tokenization."""
+"""Define the input history, matching reference solution, and checkpoint labels used before tokenization."""
 
 from pathlib import Path
 from typing import Literal
@@ -22,22 +22,22 @@ class PreparationConfig(BaseModel):
 
 
 class BranchOutcome(BaseModel):
-    """Keep a branch's final correctness label separate from the critic input.
+    """Keep a branch's checkpoint correctness labels separate from the critic input.
 
     Fields:
         seed: Sampling seed used to generate the continuation.
-        final_correctness: 1 if the final answer is correct, otherwise 0.
+        checkpoint_correctness: Exact binary grades at 2× through the final budget, in order.
         path: Saved trajectory ID relative to the original outputs root.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
     seed: int = Field(ge=0)
-    final_correctness: Literal[0, 1]
+    checkpoint_correctness: list[Literal[0, 1]] = Field(min_length=1)
     path: str
 
 
 class InputPrefix(BaseModel):
-    """Describe an individual 1× trajectory and its verified final outcome.
+    """Describe an individual 1× trajectory and its verified future checkpoint outcomes.
 
     Fields:
         prefix_id: Trajectory path and checkpoint identifier.
@@ -48,7 +48,7 @@ class InputPrefix(BaseModel):
         messages: Exact saved history through the first block, including a hint when present.
         solution_index: Reference solution selected to match the sketch or source-seed round robin.
         reference_solution: Optional full solution supplied only to the critic.
-        branch: This trajectory’s final outcome and identity, never included in the prompt.
+        branch: This trajectory’s checkpoint outcomes and identity, never included in the prompt.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)

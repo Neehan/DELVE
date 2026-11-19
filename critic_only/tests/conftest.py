@@ -47,7 +47,7 @@ def encoding_settings() -> dict[str, Any]:
 
 @pytest.fixture
 def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
-    """Save a real tiny Qwen3 model for extraction tests; MLP settings remain independent of model loading."""
+    """Save a real tiny Qwen3 model for token training and inference tests."""
     directory = tmp_path / "model"
     torch.manual_seed(7)
     config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
@@ -58,7 +58,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
                                                 input_size=16, hidden_size=16, data_signature="test-signature",
-                                                oracle_weight=1, training_mode="frozen", lora_rank=None, lora_alpha=None))
+                                                oracle_weight=1, training_mode="head", lora_rank=None, lora_alpha=None))
 
     return create
 
@@ -134,26 +134,17 @@ def token_rows() -> list[dict[str, Any]]:
     """Vary lengths and include missing oracle supervision and reference input in one row."""
     return [{"problem_key": "problem-A", "input_ids": [2, 3, 2], "length": 5,
              "privileged_input_ids": [2, 3, 2, 3, 3],
-             "oracle": False, "remaining_blocks": 2, "labels": 0.,
+             "oracle": False, "remaining_blocks": 2, "labels": [1., 0.],
              "solver_mask": [False, True, True], "privileged_solver_mask": [False, False, True, True, True],
-             "branch": {"seed": 0, "final_correctness": 0, "path": "branch0"}},
+             "branch": {"seed": 0, "checkpoint_correctness": [1, 0], "path": "branch0"}},
             {"problem_key": "problem-B", "input_ids": [2, 3], "length": 2,
              "privileged_input_ids": None,
-             "oracle": False, "remaining_blocks": 1, "labels": 1.,
+             "oracle": False, "remaining_blocks": 2, "labels": [0., 1.],
              "solver_mask": [False, True], "privileged_solver_mask": None,
-             "branch": {"seed": 0, "final_correctness": 1, "path": "branch0"}}]
+             "branch": {"seed": 0, "checkpoint_correctness": [0, 1], "path": "branch0"}}]
 
 
 @pytest.fixture
 def reference_token_rows(token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Supply every pilot training row with a reference while retaining both cached views."""
     return [{**row, "privileged_input_ids": [2, 3, 3, 2], "privileged_solver_mask": [False, True, True, True], "length": 4} for row in token_rows]
-
-
-@pytest.fixture
-def training_rows(reference_token_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Use distinct ordinary and reference vectors to verify reference-only training."""
-    return [{"problem_key": row["problem_key"], "hidden_state": [float(index + 1)] * 16,
-             "privileged_hidden_state": [0.5] * 16 if row["privileged_input_ids"] is not None else None,
-             "oracle": row["oracle"], "remaining_blocks": row["remaining_blocks"], "labels": row["labels"], "branch": row["branch"]}
-            for index, row in enumerate(reference_token_rows)]

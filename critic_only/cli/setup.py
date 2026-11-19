@@ -109,7 +109,7 @@ def tokenization_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def prepare_critic_inputs(directory: Path, settings: dict[str, Any]) -> None:
-    """Pair individual 1× histories with final outcomes, tokenize both views and save them locally.
+    """Pair individual 1× histories with exact future-checkpoint outcomes, tokenize both views and save them locally.
 
     Args:
         directory: Completed shared trajectory collection.

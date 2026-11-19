@@ -1,6 +1,6 @@
-"""Train a critic head on frozen Qwen, then optionally fine-tune Qwen and the head together.
+"""Train checkpoint-curve critics with randomly initialized prediction heads.
 
-Use only reference-containing inputs and their final-outcome targets. Evaluate on unaided validation trajectories, save resumable checkpoints, and keep the best validation model. The test split is not loaded.
+Use only reference-containing inputs and their exact future-checkpoint targets. Evaluate on unaided validation trajectories, save resumable checkpoints, and keep the best validation model. The test split is not loaded.
 """
 
 import argparse
@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from datasets import DatasetDict
 from datasets.utils import disable_progress_bars
 from dotenv import load_dotenv
 from transformers import TrainingArguments, set_seed
@@ -17,22 +18,20 @@ from transformers import TrainingArguments, set_seed
 from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
-    DEFAULT_ACCUMULATION_STEPS, DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE,
+    DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE,
     DEFAULT_LOGGING_STEPS, DEFAULT_HIDDEN_SIZE, DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED,
     DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     TRAINING_DIRECTORY, VARIANTS, DEFAULT_ORACLE_SUPERVISION_FRACTION,
     TRAINING_MODES, DEFAULT_TRAINING_MODE, DEFAULT_LORA_RANK, DEFAULT_LORA_ALPHA,
     DEFAULT_TOKEN_BATCH_SIZE, DEFAULT_TOKEN_ACCUMULATION_STEPS, DEFAULT_TRAINABLE_LAYERS,
-    DEFAULT_FINETUNING_LEARNING_RATE, DEFAULT_TRAINING_LOADER_WORKERS, DEFAULT_IN_MEMORY_LOADER_WORKERS, MODEL_FILENAME,
+    DEFAULT_FINETUNING_LEARNING_RATE, DEFAULT_TRAINING_LOADER_WORKERS, DEFAULT_CPU_LOADER_WORKERS, DEFAULT_CHECKPOINT_STEPS,
 )
 from critic_only.data.critic_input_processor import select_training_problems, select_unaided_examples, selection_fraction
-from critic_only.data.hidden_state_dataset import HiddenStateDataset
 from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.data.storage import CriticInputStorage
 from critic_only.data.dataset_loader import load_critic_splits, input_signature
 from critic_only.eval.metrics import compute_metrics
-from critic_only.models.loader import create_critic, load_head_checkpoint
-from discovery_execution.processing.storage import file_digest
+from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
 from critic_only.trainer.base_trainer import BaseTrainer
 
@@ -52,15 +51,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
     parser.add_argument("--training-problem-fraction", type=float, default=DEFAULT_TRAINING_PROBLEM_FRACTION,
                         help="fraction of training problems to retain for ablations; validation/test stay unchanged")
-    parser.add_argument("--learning-rate", type=float, help=f"one LR for all trainable parameters; defaults to {DEFAULT_LEARNING_RATE:g} for head/frozen, {DEFAULT_FINETUNING_LEARNING_RATE:g} for full/LoRA")
+    parser.add_argument("--learning-rate", type=float, help=f"one LR for all trainable parameters; defaults to {DEFAULT_LEARNING_RATE:g} for head, {DEFAULT_FINETUNING_LEARNING_RATE:g} for full/LoRA")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--accumulation-steps", type=int)
     parser.add_argument("--logging-steps", type=int, default=DEFAULT_LOGGING_STEPS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", type=Path, help="resume this run's weights, optimizer, scheduler and RNG state")
-    parser.add_argument("--head-checkpoint", type=Path, help="initialize full/LoRA tuning from a trained head; a new run starts with a fresh optimizer")
-    parser.add_argument("--checkpoint-steps", type=int, help="validate and save every N optimizer updates; omitted means each epoch")
+    parser.add_argument("--checkpoint-steps", type=int, default=DEFAULT_CHECKPOINT_STEPS, help="validate and save every N optimizer updates")
     parser.add_argument("--cpu", action="store_true", help="use CPU execution for small local checks")
     parser.add_argument("--training-mode", choices=TRAINING_MODES, default=DEFAULT_TRAINING_MODE)
     parser.add_argument("--lora-rank", type=int)
@@ -70,10 +68,8 @@ def parse_arguments() -> argparse.Namespace:
                              f"defaults to {DEFAULT_TRAINABLE_LAYERS}; counts at or above model depth select all blocks")
     args = parser.parse_args()
     configure_training_mode(args)
-    if args.checkpoint_steps is not None and args.checkpoint_steps <= 0:
+    if args.checkpoint_steps <= 0:
         parser.error("checkpoint-steps must be positive")
-    if args.head_checkpoint is not None and args.training_mode not in ("full", "lora"):
-        parser.error("head-checkpoint requires full or lora training")
     if not math.isfinite(args.learning_rate) or min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
         parser.error("training sizes and learning rate must be positive and finite")
     if args.hidden_size <= 0 or not math.isfinite(args.oracle_weight) or args.oracle_weight < 0 or not 0 <= args.oracle_supervision_fraction <= 1:
@@ -85,18 +81,18 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def configure_training_mode(args: argparse.Namespace) -> None:
-    """Fill in vector/token batch defaults and LoRA-only adapter settings.
+    """Fill in token batch defaults and LoRA-only adapter settings.
 
     Args:
         args: Parsed CLI settings, updated in place before training validation.
 
     Returns:
-        None. Frozen mode uses large vector batches; Qwen training uses small token batches with accumulation.
+        None. All modes use token batches with gradient accumulation.
     """
     lora = args.training_mode == "lora"
     if not lora and any(value is not None for value in (args.lora_rank, args.lora_alpha)):
         raise ValueError("LoRA options require --training-mode lora")
-    if args.training_mode in ("frozen", "head"):
+    if args.training_mode == "head":
         if args.trainable_layers is not None:
             raise ValueError("trainable-layers requires lora or full training")
     else:
@@ -106,9 +102,9 @@ def configure_training_mode(args: argparse.Namespace) -> None:
     if args.learning_rate is None:
         args.learning_rate = DEFAULT_FINETUNING_LEARNING_RATE if args.training_mode in ("lora", "full") else DEFAULT_LEARNING_RATE
     if args.batch_size is None:
-        args.batch_size = DEFAULT_BATCH_SIZE if args.training_mode == "frozen" else DEFAULT_TOKEN_BATCH_SIZE
+        args.batch_size = DEFAULT_TOKEN_BATCH_SIZE
     if args.accumulation_steps is None:
-        args.accumulation_steps = DEFAULT_ACCUMULATION_STEPS if args.training_mode == "frozen" else DEFAULT_TOKEN_ACCUMULATION_STEPS
+        args.accumulation_steps = DEFAULT_TOKEN_ACCUMULATION_STEPS
     if lora:
         args.lora_rank = DEFAULT_LORA_RANK if args.lora_rank is None else args.lora_rank
         args.lora_alpha = DEFAULT_LORA_ALPHA if args.lora_alpha is None else args.lora_alpha
@@ -125,14 +121,13 @@ def training_arguments(args: argparse.Namespace) -> TrainingArguments:
     Returns:
         TrainingArguments: Hugging Face configuration for periodic validation, best-checkpoint selection, and exact resume.
     """
-    interval = "epoch" if args.checkpoint_steps is None else "steps"
-    workers = DEFAULT_IN_MEMORY_LOADER_WORKERS if args.cpu or args.training_mode == "frozen" else DEFAULT_TRAINING_LOADER_WORKERS
+    workers = DEFAULT_CPU_LOADER_WORKERS if args.cpu else DEFAULT_TRAINING_LOADER_WORKERS
     return TrainingArguments(output_dir=str(args.output), num_train_epochs=args.epochs,
                              learning_rate=args.learning_rate, per_device_train_batch_size=args.batch_size,
                              per_device_eval_batch_size=args.batch_size, gradient_accumulation_steps=args.accumulation_steps,
-                             bf16=args.training_mode != "frozen" and not args.cpu, use_cpu=args.cpu, optim="adamw_torch" if args.cpu else "adamw_torch_fused",
+                             bf16=not args.cpu, use_cpu=args.cpu, optim="adamw_torch" if args.cpu else "adamw_torch_fused",
                              warmup_steps=DEFAULT_WARMUP_RATIO, weight_decay=DEFAULT_WEIGHT_DECAY,
-                             eval_strategy=interval, save_strategy=interval, eval_steps=args.checkpoint_steps,
+                             eval_strategy="steps", save_strategy="steps", eval_steps=args.checkpoint_steps,
                              save_steps=args.checkpoint_steps, load_best_model_at_end=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False,
                              logging_strategy="steps", logging_steps=args.logging_steps, logging_first_step=True,
@@ -155,10 +150,8 @@ def validate_training_run(args: argparse.Namespace, settings: CriticConfig, worl
     """
     options = {key: value for key, value in vars(args).items() if key not in {"resume", "output", "data"}}
     options["data"] = str(args.data)
-    options["head_checkpoint"] = str(args.head_checkpoint) if args.head_checkpoint is not None else None
     options["world_size"] = world_size
-    record = {"options": options, "critic": settings.model_dump(),
-              "head_checkpoint_sha256": file_digest(args.head_checkpoint / MODEL_FILENAME) if args.head_checkpoint is not None else None}
+    record = {"options": options, "critic": settings.model_dump()}
     path = args.output / "training.json"
     if args.resume is not None:
         if not args.resume.is_dir():
@@ -172,24 +165,16 @@ def validate_training_run(args: argparse.Namespace, settings: CriticConfig, worl
     return record
 
 
-def main() -> None:
-    """Train the selected critic and save the model with the best validation score.
+def select_training_splits(dataset: DatasetDict, args: argparse.Namespace) -> None:
+    """Apply training ablations and retain unaided histories for validation.
+
+    Args:
+        dataset: Loaded train/validation splits, updated in place without changing problem assignments.
+        args: Critic variant and fractions of training problems and oracle supervision to retain.
 
     Returns:
-        None. Trains the selected critic, writes metrics and resumable checkpoints, and saves the best validation model.
+        None. PPO trains only on unaided histories; the other critics also require oracle histories.
     """
-    load_dotenv()
-    disable_progress_bars()
-    disable_progress_bar()
-    args = parse_arguments()
-    set_seed(args.seed)
-    dataset, manifest = load_critic_splits(args.data, ("train", "validation"), args.training_mode)
-    cached = manifest["tokenization"]["settings"]
-    settings = CriticConfig(model=cached["model"], revision=cached["revision"], variant=args.variant,
-                            horizon=cached["horizon"], input_size=cached["hidden_size"],
-                            hidden_size=args.hidden_size, data_signature=input_signature(manifest, args.training_mode),
-                            training_mode=args.training_mode, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-                            trainable_layers=args.trainable_layers, oracle_weight=args.oracle_weight)
     if "train" not in dataset or "validation" not in dataset:
         raise ValueError("training requires nonempty problem-disjoint train and validation splits")
     dataset["train"] = select_training_problems(dataset["train"], args.training_problem_fraction)
@@ -201,16 +186,34 @@ def main() -> None:
     if args.variant == "ppo-critic":
         dataset["train"] = select_unaided_examples(dataset["train"])
     dataset["validation"] = select_unaided_examples(dataset["validation"])
+
+
+def main() -> None:
+    """Train the selected critic and save the model with the best validation score.
+
+    Returns:
+        None. Trains the selected critic, writes metrics and resumable checkpoints, and saves the best validation model.
+    """
+    load_dotenv()
+    disable_progress_bars()
+    disable_progress_bar()
+    args = parse_arguments()
+    set_seed(args.seed)
+    dataset, manifest = load_critic_splits(args.data, ("train", "validation"))
+    cached = manifest["tokenization"]["settings"]
+    settings = CriticConfig(model=cached["model"], revision=cached["revision"], variant=args.variant,
+                            horizon=cached["horizon"], input_size=cached["hidden_size"],
+                            hidden_size=args.hidden_size, data_signature=input_signature(manifest),
+                            training_mode=args.training_mode, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
+                            trainable_layers=args.trainable_layers, oracle_weight=args.oracle_weight)
+    select_training_splits(dataset, args)
     training = training_arguments(args)
     record = validate_training_run(args, settings, training.world_size) if training.process_index == 0 else None
-    head_weights = load_head_checkpoint(settings, args.head_checkpoint) if args.head_checkpoint is not None else None
     model = create_critic(settings, args.cpu)
-    if head_weights is not None and args.resume is None:
-        model.load_head_weights(head_weights)
-    tokenizer = None if args.training_mode == "frozen" else CriticInputStorage(args.data).load_tokenizer()
+    tokenizer = CriticInputStorage(args.data).load_tokenizer()
     trainer = BaseTrainer(model=model, args=training, data_collator=CriticBatcher(tokenizer),
-                          train_dataset=HiddenStateDataset(dataset["train"]) if args.training_mode == "frozen" else dataset["train"],
-                          eval_dataset=HiddenStateDataset(dataset["validation"]) if args.training_mode == "frozen" else dataset["validation"],
+                          train_dataset=dataset["train"],
+                          eval_dataset=dataset["validation"],
                           compute_metrics=partial(compute_metrics, problem_keys=list(dataset["validation"]["problem_key"])))
     with trainer.args.main_process_first():
         if trainer.is_world_process_zero():

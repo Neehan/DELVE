@@ -1,4 +1,4 @@
-"""Exercise setup, hidden-state caching, frozen/LoRA/full training, and evaluation without network or GPU dependencies."""
+"""Exercise setup, head/LoRA/full training, and evaluation without network or GPU dependencies."""
 
 import json
 import weakref
@@ -12,12 +12,12 @@ from unittest.mock import Mock
 import pyarrow as pa
 import pytest
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast
 
 from critic_only.constants import CRITIC_TARGET
-from critic_only.cli import cache_hidden_states, evaluate, setup, train
+from critic_only.cli import evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
@@ -53,44 +53,38 @@ def temporary_dataset_lifetimes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(setup, "TemporaryDirectory", checked_directory)
 
 
-def save_features(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]) -> None:
-    """Publish a small self-contained feature collection with matching checksums and extraction identity."""
+def save_token_inputs(root: Path, settings: CriticConfig, rows: list[dict[str, Any]]) -> None:
+    """Publish token splits with matching checksums and model settings."""
     checksums = {}
     for split in ("train", "validation", "test"):
         values = [{**row, "problem_key": f"{split}-{index}", "prefix_id": f"{split}-{index}-{oracle}", "oracle": oracle}
                   for index, row in enumerate(rows) for oracle in ((False, True) if split == "train" else (False,))]
-        folder = "hidden_states" if settings.training_mode == "frozen" else "tokenized"
-        path = root / split / "critic_only" / folder / "part-00000.parquet"
+        path = root / split / "critic_only" / "tokenized" / "part-00000.parquet"
         write_parquet_atomic(path, pa.Table.from_pylist(values))
         checksums[str(path.relative_to(root))] = file_digest(path)
     tokenization = {"settings": {"target": CRITIC_TARGET, "model": settings.model, "revision": settings.revision,
                                 "horizon": settings.horizon, "hidden_size": settings.input_size},
-                    "complete": True, "shards": checksums if settings.training_mode != "frozen" else {}}
-    write_json_atomic(root / "manifest.json", {"tokenization": tokenization,
-        "features": {"complete": True, "signature": settings.data_signature, "shards": checksums,
-                     "settings": {"hidden_size": settings.input_size}}})
+                    "complete": True, "shards": checksums}
+    write_json_atomic(root / "manifest.json", {"tokenization": tokenization})
 
 
 @pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
 @pytest.mark.parametrize("fraction", [1.0, 0.5])
-@pytest.mark.parametrize("mode", ["frozen", "head", "lora", "full"])
+@pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic_settings: Callable[[str], CriticConfig],
-    training_rows: list[dict[str, Any]], reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """All variants train from cached vectors or tokens and export reference-conditioned final-outcome predictions."""
-    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode in ("frozen", "head") else 64,
+    reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """All variants train on solver tokens and export reference-conditioned checkpoint curves."""
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "head" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     root, output, report = tmp_path / "data", tmp_path / "run", tmp_path / "evaluation"
-    save_features(root, settings, training_rows if mode == "frozen" else reference_token_rows)
+    save_token_inputs(root, settings, reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
     trainer_factory = Mock(wraps=train.BaseTrainer)
     monkeypatch.setattr(train, "BaseTrainer", trainer_factory)
-    feature_factory = Mock(wraps=train.HiddenStateDataset)
-    monkeypatch.setattr(train, "HiddenStateDataset", feature_factory)
     monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output), "--variant", variant,
         "--training-mode", mode, "--accumulation-steps", "1", "--hidden-size", "16", "--epochs", "1", "--batch-size", "2", "--training-problem-fraction", str(fraction), "--cpu"])
     train.main()
-    training = trainer_factory.call_args.kwargs["train_dataset"]
-    selected = feature_factory.call_args_list[0].args[0] if mode == "frozen" else training
+    selected = trainer_factory.call_args.kwargs["train_dataset"]
     assert len(set(selected["problem_key"])) == int(2 * fraction)
     assert any(selected["oracle"]) == (variant != "ppo-critic")
     state = json.loads((output / "trainer_state.json").read_text())
@@ -100,8 +94,8 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
         "--destination", str(report), "--split", "test", "--cpu"])
     evaluate.main()
     predictions = Dataset.from_parquet(str(report / "predictions.parquet"))
-    assert list(predictions["final_correctness"]) == [row["labels"] for row in training_rows]
-    assert "probability" in predictions.column_names
+    assert list(predictions["checkpoint_correctness"]) == [row["labels"] for row in reference_token_rows]
+    assert "checkpoint_probabilities" in predictions.column_names
     assert "privileged_probability" not in predictions.column_names
     metrics = json.loads((report / "metrics.json").read_text())
     assert metrics["reference_solution"] is True
@@ -110,7 +104,7 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
 
 @pytest.mark.parametrize("fraction", ["0", "-1", "1.1", "nan"])
 def test_bad_training_fraction_fails_early(fraction: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject invalid experiments before loading feature shards."""
+    """Reject invalid experiments before loading token shards."""
     loader = Mock()
     monkeypatch.setattr(train, "load_critic_splits", loader)
     monkeypatch.setattr("sys.argv", ["train", "--data", "/missing", "--training-problem-fraction", fraction])
@@ -119,9 +113,9 @@ def test_bad_training_fraction_fails_early(fraction: str, monkeypatch: pytest.Mo
     loader.assert_not_called()
 
 
-def test_setup_and_extraction_cli(prepared_inputs: CollectionFixture, critic_settings: Callable[[str], CriticConfig],
+def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, monkeypatch: pytest.MonkeyPatch, temporary_dataset_lifetimes: None) -> None:
-    """Shared setup does not load Qwen; extraction pins one model and reuses its exact token cache."""
+    """Setup pins the model and saves token splits without generating hidden-state caches."""
     settings = critic_settings("ppo-critic")
     tokenizer.save_pretrained(settings.model)
     root = prepared_inputs.destination.parent / "processed"
@@ -135,15 +129,12 @@ def test_setup_and_extraction_cli(prepared_inputs: CollectionFixture, critic_set
     assert (root / "splits.parquet").is_file()
     assert (root / "tiny" / "train" / "critic_only" / "tokenized").is_dir()
     assert not (root / "tiny" / "train" / "critic_only" / "hidden_states").exists()
-    monkeypatch.setattr("sys.argv", ["cache_hidden_states", "--data", str(root / "tiny"), "--cpu"])
-    cache_hidden_states.main()
     manifest = json.loads((root / "tiny" / "manifest.json").read_text())
-    assert manifest["features"]["complete"] and manifest["tokenization"]["complete"]
-    cache_hidden_states.main()
+    assert manifest["tokenization"]["complete"]
     api.model_info.assert_called_once()
 
 
-@pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("frozen", "1"), ("full", "0"), ("full", "-1")])
+@pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("head", "1"), ("full", "0"), ("full", "-1")])
 def test_invalid_trainable_layers(mode: str, count: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject nonpositive layer counts and layer selection for frozen training before loading data."""
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--trainable-layers", count])
@@ -160,14 +151,14 @@ def test_trainable_layers_argument(mode: str, monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.parametrize("mode", ["lora", "full"])
 def test_default_trainable_layers(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default token-based training to 64 final layers while keeping frozen mode free of adapter settings."""
+    """Default token-based training to eight final layers."""
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode])
-    assert train.parse_arguments().trainable_layers == 64
+    assert train.parse_arguments().trainable_layers == 8
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused"])
-    assert train.parse_arguments().trainable_layers is None
+    assert train.parse_arguments().trainable_layers == 8
 
 
-@pytest.mark.parametrize("mode", ["frozen", "full"])
+@pytest.mark.parametrize("mode", ["head", "full"])
 @pytest.mark.parametrize("option", ["--lora-rank", "--lora-alpha"])
 def test_adapter_options_require_lora(mode: str, option: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject adapter settings for modes that train without adapters."""
@@ -189,62 +180,28 @@ def test_pinned_hf_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("mode", ["full", "lora"])
-def test_head_warmup_then_finetune_and_resume(mode: str, critic_settings: Callable[[str], CriticConfig],
+def test_random_head_finetune_and_resume(mode: str, critic_settings: Callable[[str], CriticConfig],
     reference_token_rows: list[dict[str, Any]], tokenizer: PreTrainedTokenizerFast,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Train a live frozen head, transfer exact weights with a fresh optimizer, and reproduce interrupted training."""
-    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
-    root, head_run, tuning = tmp_path / "data", tmp_path / "head", tmp_path / "tuning"
-    save_features(root, settings, reference_token_rows)
+    """Fresh heads train without a source checkpoint; resume exactly restores optimizer and model state."""
+    settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": mode})
+    root, output = tmp_path / "data", tmp_path / "run"
+    save_token_inputs(root, settings, reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
-    common = ["train", "--data", str(root), "--variant", "ppo-oracle-critic", "--hidden-size", "16",
-              "--epochs", "1", "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "1", "--cpu"]
-    factory = Mock(wraps=train.BaseTrainer)
-    monkeypatch.setattr(train, "BaseTrainer", factory)
-    monkeypatch.setattr("sys.argv", common + ["--training-mode", "head", "--output", str(head_run)])
-    train.main()
-    head_model = factory.call_args.kwargs["model"]
-    assert head_model.language_model is not None
-    assert all(not parameter.requires_grad and parameter.grad is None for parameter in head_model.language_model.parameters())
-    head_weights = load_file(str(head_run / "best" / "critic.safetensors"))
-    assert all(not name.startswith("language_model.") for name in head_weights)
-    assert factory.call_args.kwargs["args"].learning_rate == 3e-4
-    native_factory = factory._mock_wraps
-
-    def inspect_initialization(*args: Any, **kwargs: Any) -> Any:
-        """Check restored head weights and optimizer creation before the first tuning update."""
-        model = kwargs["model"]
-        for name, parameter in model.named_parameters():
-            if not name.startswith("language_model."):
-                torch.testing.assert_close(parameter, head_weights[name], rtol=0, atol=0)
-        trainer = native_factory(*args, **kwargs)
-        assert trainer.optimizer is None
-        assert trainer.args.learning_rate == 3e-6
-        assert trainer.args.get_warmup_steps(500) == 25
-        return trainer
-
-    monkeypatch.setattr(train, "BaseTrainer", inspect_initialization)
-    command = common + ["--training-mode", mode, "--trainable-layers", "1", "--output", str(tuning),
-                        "--head-checkpoint", str(head_run / "best")]
+    command = ["train", "--data", str(root), "--output", str(output), "--variant", "ppo-oracle-critic",
+        "--training-mode", mode, "--trainable-layers", "1", "--hidden-size", "16", "--epochs", "1",
+        "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "1", "--cpu"]
     monkeypatch.setattr("sys.argv", command)
     train.main()
-    expected = load_file(str(tuning / "best" / "critic.safetensors"))
-    state = json.loads((tuning / "trainer_state.json").read_text())
-    assert state["global_step"] == 2
-    assert [row["step"] for row in state["log_history"] if "eval_terminal_nll" in row] == [1, 2]
-    record = json.loads((tuning / "training.json").read_text())
-    assert record["head_checkpoint_sha256"] == file_digest(head_run / "best" / "critic.safetensors")
-    monkeypatch.setattr(train, "BaseTrainer", native_factory)
-    monkeypatch.setattr("sys.argv", command + ["--resume", str(tuning / "checkpoint-1")])
+    expected = load_file(str(output / "best" / "critic.safetensors"))
+    record = json.loads((output / "training.json").read_text())
+    assert "head_checkpoint" not in record["options"]
+    assert record["options"]["learning_rate"] == 1e-5
+    monkeypatch.setattr("sys.argv", command + ["--resume", str(output / "checkpoint-1")])
     train.main()
-    actual = load_file(str(tuning / "best" / "critic.safetensors"))
-    assert actual.keys() == expected.keys()
+    actual = load_file(str(output / "best" / "critic.safetensors"))
     for name in expected:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
-    head_weights["prediction_head.bias"] += 1
-    save_file(head_weights, str(head_run / "best" / "critic.safetensors"))
-    with pytest.raises(ValueError, match="saved training settings"):
-        train.main()
 
 
 @pytest.mark.parametrize("option", ["--trainable-layers", "--lora-rank", "--lora-alpha", "--head-checkpoint"])
@@ -255,7 +212,7 @@ def test_head_mode_rejects_tuning_options(option: str, monkeypatch: pytest.Monke
         train.parse_arguments()
 
 
-@pytest.mark.parametrize("mode,expected", [("frozen", 3e-4), ("head", 3e-4), ("full", 3e-6), ("lora", 3e-6)])
+@pytest.mark.parametrize("mode,expected", [("head", 3e-4), ("full", 1e-5), ("lora", 1e-5)])
 def test_learning_rate_defaults_by_stage(mode: str, expected: float, monkeypatch: pytest.MonkeyPatch) -> None:
     """Use the larger head-training LR only when Qwen is frozen; explicit overrides remain available."""
     arguments = ["train", "--data", "unused", "--training-mode", mode]
@@ -291,7 +248,7 @@ def test_checkpoint_interval_longer_than_run(critic_settings: Callable[[str], Cr
     """A short head run still evaluates its final update and saves a resumable best checkpoint."""
     settings = critic_settings("ppo-oracle-critic").model_copy(update={"training_mode": "head"})
     root, output = tmp_path / "data", tmp_path / "run"
-    save_features(root, settings, reference_token_rows)
+    save_token_inputs(root, settings, reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
     monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output),
         "--variant", "ppo-oracle-critic", "--training-mode", "head", "--hidden-size", "16",
@@ -303,3 +260,26 @@ def test_checkpoint_interval_longer_than_run(critic_settings: Callable[[str], Cr
     assert Path(state["best_model_checkpoint"]).name == "checkpoint-2"
     assert (output / "best" / "critic.safetensors").is_file()
     assert (output / "checkpoint-2" / "optimizer.pt").is_file()
+
+
+def test_default_recipe_starts_full_tuning_without_head_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default recipe uses random heads, eight full blocks, one epoch and periodic checkpoints."""
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused"])
+    args = train.parse_arguments()
+    assert (args.training_mode, args.trainable_layers, args.learning_rate) == ("full", 8, 1e-5)
+    assert (args.epochs, args.batch_size, args.accumulation_steps, args.checkpoint_steps) == (1, 1, 16, 125)
+    assert "head_checkpoint" not in vars(args)
+    args.cpu = True
+    training = train.training_arguments(args)
+    assert training.get_warmup_steps(500) == 25
+    assert training.data_seed == training.seed == 1234
+
+
+def test_cached_mode_rejected_before_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The removed endpoint-only mode must fail before reading data or allocating Qwen."""
+    loader = Mock()
+    monkeypatch.setattr(train, "load_critic_splits", loader)
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "frozen"])
+    with pytest.raises(SystemExit):
+        train.main()
+    loader.assert_not_called()

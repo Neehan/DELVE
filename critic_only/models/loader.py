@@ -1,14 +1,12 @@
-"""Construct a cached-vector critic, a live frozen-Qwen head, or a full/LoRA critic."""
+"""Construct Qwen and a critic head for head-only, full, or LoRA training."""
 
-from pathlib import Path
 from typing import cast
 
 import torch
 from peft import LoraConfig, get_peft_model
-from safetensors.torch import load_file
 from transformers import AutoModel
 
-from critic_only.constants import CONFIG_FILENAME, MODEL_FILENAME, CPU_ATTENTION, DEFAULT_ATTENTION
+from critic_only.constants import CPU_ATTENTION, DEFAULT_ATTENTION
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
 from critic_only.models.models import CriticConfig
@@ -17,39 +15,38 @@ from critic_only.models.ppo_critic import PPOCritic
 
 
 def create_critic(settings: CriticConfig, cpu: bool) -> BaseCritic:
-    """Build prediction heads and attach Qwen when training on tokens.
+    """Build prediction heads and attach Qwen for all-token supervision.
 
-    Frozen mode loads no Qwen weights. Head mode freezes live Qwen and trains only the MLP. LoRA adapts selected final layers. Full mode trains all parameters in selected final blocks and freezes the rest, including the output normalization. Trainer handles device placement and BF16 autocast; trainable full-block weights remain FP32.
+    Every mode trains the shared MLP and prediction heads on all solver tokens. Head mode freezes Qwen; LoRA adapts selected final layers; full mode trains all parameters in selected final blocks and freezes the rest, including the output normalization. Trainer handles device placement and BF16 autocast; trainable full-block weights remain FP32.
 
     Args:
         settings: Critic variant, dimensions, input-cache identity, and training-mode settings.
-        cpu: Use FP32/SDPA for CPU execution or BF16/FlashAttention-2 for GPU execution. Frozen MLP construction is unaffected.
+        cpu: Use FP32/SDPA for CPU execution or BF16/FlashAttention-2 for GPU execution.
 
     Returns:
         BaseCritic: Fresh PPOCritic, PPOOracleCritic, or DECritic; call load_from_weights to restore trained weights.
     """
     classes = {"ppo-critic": PPOCritic, "ppo-oracle-critic": PPOOracleCritic, "de-critic": DECritic}
     critic = classes[settings.variant](settings)
-    if settings.training_mode != "frozen":
-        model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
-                                          dtype=torch.float32 if cpu else torch.bfloat16,
-                                          attn_implementation=CPU_ATTENTION if cpu else DEFAULT_ATTENTION)
-        model.config.use_cache = False
-        if settings.training_mode == "head":
-            critic.language_model = model.requires_grad_(False)
-            return critic
-        first_trainable_layer = max(0, model.config.num_hidden_layers - cast(int, settings.trainable_layers))
-        if settings.training_mode == "lora":
-            critic.language_model = get_peft_model(model, adapter_config(settings, first_trainable_layer))
-        else:
-            model.requires_grad_(False)
-            # FP32 trainable weights retain small updates while autocast keeps matrix products in BF16.
-            for layer_index in range(first_trainable_layer, model.config.num_hidden_layers):
-                model.get_submodule(f"layers.{layer_index}").float().requires_grad_(True)
-            critic.language_model = model
-        # Non-reentrant checkpointing supports gradients in selected blocks without embedding-output gradients.
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        model.disable_input_require_grads()
+    model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
+                                      dtype=torch.float32 if cpu else torch.bfloat16,
+                                      attn_implementation=CPU_ATTENTION if cpu else DEFAULT_ATTENTION)
+    model.config.use_cache = False
+    if settings.training_mode == "head":
+        critic.language_model = model.requires_grad_(False)
+        return critic
+    first_trainable_layer = max(0, model.config.num_hidden_layers - cast(int, settings.trainable_layers))
+    if settings.training_mode == "lora":
+        critic.language_model = get_peft_model(model, adapter_config(settings, first_trainable_layer))
+    else:
+        model.requires_grad_(False)
+        # FP32 trainable weights retain small updates while autocast keeps matrix products in BF16.
+        for layer_index in range(first_trainable_layer, model.config.num_hidden_layers):
+            model.get_submodule(f"layers.{layer_index}").float().requires_grad_(True)
+        critic.language_model = model
+    # Non-reentrant checkpointing supports gradients in selected blocks without embedding-output gradients.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.disable_input_require_grads()
     return critic
 
 
@@ -70,23 +67,3 @@ def adapter_config(settings: CriticConfig, first_trainable_layer: int) -> LoraCo
         excluded_modules = rf"(?:.*\.)?layers\.(?:{layer_indices})\..*"
     return LoraConfig(r=cast(int, settings.lora_rank), lora_alpha=cast(int, settings.lora_alpha),
                       target_modules="all-linear", exclude_modules=excluded_modules)
-
-
-def load_head_checkpoint(settings: CriticConfig, directory: Path) -> dict[str, torch.Tensor]:
-    """Read a compatible head-training checkpoint before loading Qwen.
-
-    Args:
-        settings: Destination full/LoRA configuration, including the exact token-cache identity.
-        directory: Completed head-training checkpoint; Qwen weights are never transferred.
-
-    Returns:
-        dict[str, Tensor]: MLP/value-head weights. Raises if inputs, architecture, or model revision differ.
-    """
-    source = CriticConfig.model_validate_json((directory / CONFIG_FILENAME).read_text())
-    if source.training_mode != "head" or settings.training_mode not in ("full", "lora"):
-        raise ValueError("head initialization requires a head checkpoint and full/LoRA destination")
-    expected = settings.model_copy(update={"training_mode": "head", "trainable_layers": None,
-                                           "lora_rank": None, "lora_alpha": None})
-    if source != expected:
-        raise ValueError("head checkpoint inputs or critic configuration differ")
-    return load_file(str(directory / MODEL_FILENAME))

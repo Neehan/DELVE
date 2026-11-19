@@ -1,6 +1,6 @@
 """Build critic prompts and save their token IDs, with and without a reference solution.
 
-The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s final binary label, kept outside the prompt.
+The critic system prompt precedes the saved solver history. The reference version adds the matching solution to the system prompt. Both versions share the trajectory’s exact future checkpoint labels, kept outside the prompt.
 """
 
 import hashlib
@@ -18,8 +18,7 @@ from critic_only.data.solver_tokens import conversation_spans, solver_token_mask
 class PrefixTokenizer:
     """Render critic references and histories, then mark each solver token for Monte Carlo supervision.
 
-    encode saves both input views. Inputs end at the final solver token, so frozen endpoint vectors and
-    token-model endpoint predictions refer to the same causal state. No terminal labels enter either view.
+    encode saves both input views and their solver masks. Inputs end at the final solver token used for endpoint metrics. No terminal labels enter either view.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
@@ -29,12 +28,18 @@ class PrefixTokenizer:
         self.tokenizer = tokenizer
 
     def encode(self, row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        """Return token IDs/masks for both reference views and this trajectory's separate final binary label.
+        """Tokenize the observed history and keep its future grades outside both input views.
 
-        row is a serialized InputPrefix. settings pins prompts, total horizon and maximum length. Only the
-        total budget is placed before the history; endpoint phase/completion information would leak backward.
+        Args:
+            row: Serialized InputPrefix containing the saved 1× history, matching reference and future checkpoint grades.
+            settings: Pinned prompts, total horizon and maximum input length. Only the total budget precedes the history; endpoint metadata would leak backward to earlier tokens.
+
+        Returns:
+            dict[str, Any]: Token IDs and solver masks with/without the reference, binary checkpoint labels, and identities for cache validation. Training selects the reference-containing view.
         """
         record = InputPrefix.model_validate(dict(row))
+        if len(record.branch.checkpoint_correctness) != settings["horizon"] - 1 or record.remaining_blocks != settings["horizon"] - 1:
+            raise ValueError(f"checkpoint labels do not match the 1× input budget: {record.prefix_id}")
         conversation, spans = conversation_spans(record.messages)
         system = settings["critic_prompt"].format(block_tokens=OUTPUT_TOKENS_PER_BLOCK, horizon=settings["horizon"])
         messages = [{"role": "system", "content": system}, {"role": "user", "content": conversation}]
@@ -50,7 +55,7 @@ class PrefixTokenizer:
                 "solver_mask": mask, "privileged_solver_mask": privileged_mask,
                 "input_hash": token_digest(token_ids),
                 "privileged_input_hash": token_digest(privileged_ids) if privileged_ids is not None else None,
-                "split": record.split, "labels": record.branch.final_correctness, "branch": record.branch.model_dump(),
+                "split": record.split, "labels": record.branch.checkpoint_correctness, "branch": record.branch.model_dump(),
                 "remaining_blocks": record.remaining_blocks,
                 "length": len(privileged_ids) if privileged_ids is not None else len(token_ids),
                 "prefix_id": record.prefix_id, "problem_key": record.problem_key, "oracle": record.oracle}
@@ -74,7 +79,7 @@ class PrefixTokenizer:
 
 
 def token_digest(token_ids: list[int]) -> str:
-    """Hash token IDs so hidden-state generation can check it is encoding the saved input.
+    """Hash token IDs so storage can verify the saved input sequence.
 
     Args:
         token_ids: Ordered token IDs for one exact formatted critic input.
