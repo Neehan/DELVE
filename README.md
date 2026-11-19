@@ -4,7 +4,7 @@ Discovery-Execution Long-horizon Value Estimation. The `discovery_execution/` ha
 
 Each problem/seed runs solve → critique → revise until its budget is exhausted, saving a checkpoint every 8,192 output tokens. Both unaided and oracle runs default to k=5, with explicit budgets up to k=8 supported. Oracle sketches can be injected at any block boundary before the chosen budget. Finishing an answer does not stop generation.
 
-Critic processing uses a separate 4,096-token checkpoint interval: observe the first 4k tokens and predict answer correctness at 8k–20k (2×–5×). The full 40k source trajectory and all ten analysis checkpoints are retained; generation’s 8,192-token blocks are unchanged. It receives a reference solution and the total budget; all variants supervise every solver token without exposing future reasoning or labels.
+Critic processing uses a separate 4,096-token checkpoint interval: observe an approximately 4k-token prefix and predict answer correctness at 8k–20k (2×–5×). The full 40k source trajectory and all ten analysis checkpoints are retained; generation’s 8,192-token blocks are unchanged. It receives a reference solution and the total budget; all variants supervise every solver token without exposing future reasoning or labels.
 
 Training labels come from continuing the same self-refinement harness and grading that answer: 1 if correct, 0 otherwise. Critiques cannot replace it, and an unfinished box leaves the previous complete answer in force. A later complete wrong answer still replaces an earlier correct one.
 

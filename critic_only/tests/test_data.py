@@ -4,11 +4,13 @@ import hashlib
 import json
 import shutil
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 import zstandard
 from datasets import Dataset
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast
 
 from critic_only.constants import CRITIC_TARGET, TRAJECTORY_SEEDS
@@ -30,8 +32,11 @@ def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     """Compile real raw artifacts, then select critic inputs from the shared Parquet collection."""
     splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
     TrajectoryProcessor(config.outputs_directory, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS)
+    backend = Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
     return CriticInputProcessor(PreparationConfig(source_directory=config.destination, horizon=config.horizon),
-        CheckpointReconstructor(Mock(is_fast=True), OUTPUT_TOKENS_PER_BLOCK))
+        CheckpointReconstructor(tokenizer, OUTPUT_TOKENS_PER_BLOCK))
 
 
 def test_exact_fixed_splits(prepared_inputs: CollectionFixture) -> None:
