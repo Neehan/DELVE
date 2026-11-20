@@ -1,4 +1,4 @@
-"""Train checkpoint-curve critics with randomly initialized prediction heads.
+"""Train checkpoint-curve critics for one pass with randomly initialized prediction heads.
 
 Use only reference-containing inputs and their exact future-checkpoint targets. Evaluate on unaided validation trajectories, save resumable checkpoints, and keep the best validation model. The test split is not loaded.
 """
@@ -18,7 +18,7 @@ from transformers import TrainingArguments, set_seed
 from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
-    DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE,
+    TRAINING_EPOCHS, DEFAULT_LEARNING_RATE,
     DEFAULT_LOGGING_STEPS, DEFAULT_HIDDEN_SIZE, DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED,
     DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     TRAINING_DIRECTORY, VARIANTS, DEFAULT_ORACLE_SUPERVISION_FRACTION,
@@ -52,7 +52,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--training-problem-fraction", type=float, default=DEFAULT_TRAINING_PROBLEM_FRACTION,
                         help="fraction of training problems to retain for ablations; validation/test stay unchanged")
     parser.add_argument("--learning-rate", type=float, help=f"one LR for all trainable parameters; defaults to {DEFAULT_LEARNING_RATE:g} for head, {DEFAULT_FINETUNING_LEARNING_RATE:g} for full/LoRA")
-    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--accumulation-steps", type=int)
     parser.add_argument("--logging-steps", type=int, default=DEFAULT_LOGGING_STEPS)
@@ -70,7 +69,7 @@ def parse_arguments() -> argparse.Namespace:
     configure_training_mode(args)
     if args.checkpoint_steps <= 0:
         parser.error("checkpoint-steps must be positive")
-    if not math.isfinite(args.learning_rate) or min(args.epochs, args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
+    if not math.isfinite(args.learning_rate) or min(args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
         parser.error("training sizes and learning rate must be positive and finite")
     if args.hidden_size <= 0 or not math.isfinite(args.oracle_weight) or args.oracle_weight < 0 or not 0 <= args.oracle_supervision_fraction <= 1:
         parser.error("invalid MLP size, oracle weight, or oracle-supervision-fraction")
@@ -122,7 +121,7 @@ def training_arguments(args: argparse.Namespace) -> TrainingArguments:
         TrainingArguments: Hugging Face configuration for periodic validation, best-checkpoint selection, and exact resume.
     """
     workers = DEFAULT_CPU_LOADER_WORKERS if args.cpu else DEFAULT_TRAINING_LOADER_WORKERS
-    return TrainingArguments(output_dir=str(args.output), num_train_epochs=args.epochs,
+    return TrainingArguments(output_dir=str(args.output), num_train_epochs=TRAINING_EPOCHS,
                              learning_rate=args.learning_rate, per_device_train_batch_size=args.batch_size,
                              per_device_eval_batch_size=args.batch_size, gradient_accumulation_steps=args.accumulation_steps,
                              bf16=not args.cpu, use_cpu=args.cpu, optim="adamw_torch" if args.cpu else "adamw_torch_fused",
@@ -149,6 +148,7 @@ def validate_training_run(args: argparse.Namespace, settings: CriticConfig, worl
         dict[str, Any]: Reproducibility record to write to training.json; raises if an existing run is incompatible.
     """
     options = {key: value for key, value in vars(args).items() if key not in {"resume", "output", "data"}}
+    options["epochs"] = TRAINING_EPOCHS
     options["data"] = str(args.data)
     options["world_size"] = world_size
     record = {"options": options, "critic": settings.model_dump()}

@@ -88,12 +88,14 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
     trainer_factory = Mock(wraps=train.BaseTrainer)
     monkeypatch.setattr(train, "BaseTrainer", trainer_factory)
     monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output), "--variant", variant,
-        "--training-mode", mode, "--accumulation-steps", "1", "--hidden-size", "16", "--epochs", "1", "--batch-size", "2", "--training-problem-fraction", str(fraction), "--cpu"])
+        "--training-mode", mode, "--accumulation-steps", "1", "--hidden-size", "16", "--batch-size", "2", "--training-problem-fraction", str(fraction), "--cpu"])
     train.main()
     selected = trainer_factory.call_args.kwargs["train_dataset"]
     assert len(set(selected["problem_key"])) == int(2 * fraction)
     assert any(selected["oracle"]) == (variant != "ppo-critic")
     state = json.loads((output / "trainer_state.json").read_text())
+    assert state["epoch"] == 1
+    assert json.loads((output / "training.json").read_text())["options"]["epochs"] == 1
     assert any("eval_terminal_nll" in row for row in state["log_history"])
     assert '"learning_rate"' in capsys.readouterr().out
     monkeypatch.setattr("sys.argv", ["evaluate", "--data", str(root), "--checkpoint", str(output / "best"),
@@ -207,7 +209,7 @@ def test_random_head_finetune_and_resume(mode: str, critic_settings: Callable[[s
     save_token_inputs(root, settings, reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
     command = ["train", "--data", str(root), "--output", str(output), "--variant", "ppo-oracle-critic",
-        "--training-mode", mode, "--trainable-layers", "1", "--hidden-size", "16", "--epochs", "1",
+        "--training-mode", mode, "--trainable-layers", "1", "--hidden-size", "16",
         "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "1", "--cpu"]
     monkeypatch.setattr("sys.argv", command)
     train.main()
@@ -270,7 +272,7 @@ def test_checkpoint_interval_longer_than_run(critic_settings: Callable[[str], Cr
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
     monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output),
         "--variant", "ppo-oracle-critic", "--training-mode", "head", "--hidden-size", "16",
-        "--epochs", "1", "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "125", "--cpu"])
+        "--batch-size", "2", "--accumulation-steps", "1", "--checkpoint-steps", "125", "--cpu"])
     train.main()
     state = json.loads((output / "trainer_state.json").read_text())
     assert state["global_step"] == 2
@@ -285,10 +287,11 @@ def test_default_recipe_starts_full_tuning_without_head_source(monkeypatch: pyte
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused"])
     args = train.parse_arguments()
     assert (args.training_mode, args.trainable_layers, args.learning_rate) == ("full", 8, 1e-5)
-    assert (args.epochs, args.batch_size, args.accumulation_steps, args.checkpoint_steps) == (1, 1, 16, 125)
+    assert (args.batch_size, args.accumulation_steps, args.checkpoint_steps) == (1, 16, 125)
     assert "head_checkpoint" not in vars(args)
     args.cpu = True
     training = train.training_arguments(args)
+    assert training.num_train_epochs == 1
     assert training.get_warmup_steps(500) == 25
     assert training.data_seed == training.seed == 1234
 
@@ -298,6 +301,17 @@ def test_cached_mode_rejected_before_loading(monkeypatch: pytest.MonkeyPatch) ->
     loader = Mock()
     monkeypatch.setattr(train, "load_critic_splits", loader)
     monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", "frozen"])
+    with pytest.raises(SystemExit):
+        train.main()
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["head", "lora", "full"])
+def test_epoch_override_rejected_before_loading(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An obsolete wrapper cannot silently extend any training mode beyond the one-pass budget."""
+    loader = Mock()
+    monkeypatch.setattr(train, "load_critic_splits", loader)
+    monkeypatch.setattr("sys.argv", ["train", "--data", "unused", "--training-mode", mode, "--epochs", "5"])
     with pytest.raises(SystemExit):
         train.main()
     loader.assert_not_called()
