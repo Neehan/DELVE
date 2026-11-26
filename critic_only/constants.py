@@ -2,10 +2,13 @@
 
 from pathlib import Path
 
+from discovery_execution.harness.constants import DEFAULT_BLOCKS
+
 DEFAULT_SEED = 1234
 DEFAULT_HORIZON = 5
 INPUT_PREFIX_BLOCKS = 1
 TRAJECTORY_SEEDS = tuple(range(8))
+CRITIC_TRAJECTORY_ARMS = (f"unaided-{DEFAULT_BLOCKS}x", "oracle-at-0x-execution")
 CRITIC_TARGET = "individual-trajectory-checkpoint-curves-v2"
 CRITIC_INPUT_VIEW = "reference-only"
 DEFAULT_HIDDEN_SIZE = 512

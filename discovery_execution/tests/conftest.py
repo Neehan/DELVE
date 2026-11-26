@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+import zstandard
 
 from discovery_execution.harness.constants import (
     MIN_CONTEXT_TOKENS, OUTPUT_TOKENS_PER_BLOCK, DEFAULT_BLOCKS,
@@ -18,12 +19,16 @@ from discovery_execution.harness.models import BackendConfig, Checkpoint, Datase
 from discovery_execution.harness.openai_client import OpenAIClient
 from discovery_execution.harness.runner import Runner
 from discovery_execution.cli.run import backend_configuration, parse_arguments
+from discovery_execution.outputs.parquet_exporter import ParquetTrajectoryExporter
 
 
 @pytest.fixture
 def hf_upload_api() -> Mock:
     """Capture upload operations without contacting Hugging Face."""
-    return Mock()
+    api = Mock()
+    api.dataset_info.return_value.sha = "checked-revision"
+    api.dataset_info.return_value.siblings = []
+    return api
 
 
 @pytest.fixture
@@ -36,18 +41,38 @@ def output_artifacts(tmp_path: Path) -> Path:
     for name in ("meta.json", "conversation.json.zst", "checkpoint_1x.json.zst", "audit.json",
                  ".lock", "tmp123", ".env", "debug.json", "other.json.zst"):
         (trajectory / name).write_text("test", encoding="utf-8")
+    metadata = dict(competition="aime", year=2024, model="model", arm="unaided-1x", problem_id="example",
+                    experiment="unaided", seed=0, compute_multiplier_k=1, inject_sketch_at=0, solution_index=0)
+    messages = [dict(role="user", content="Problem"), dict(role="assistant", content="Answer")]
+    boundary = Checkpoint(output_tokens=OUTPUT_TOKENS_PER_BLOCK, message_count=2, last_message_chars=6)
+    state = RunState(messages=messages, output_tokens=OUTPUT_TOKENS_PER_BLOCK, phase="solve", injected=False,
+                     response_finished=True, requests=[], checkpoints=[boundary])
+    (trajectory / "meta.json").write_text(json.dumps(metadata))
+    (trajectory / "conversation.json.zst").write_bytes(zstandard.compress(state.model_dump_json().encode()))
+    (trajectory / "checkpoint_1x.json.zst").write_bytes(zstandard.compress(json.dumps(dict(messages=messages, output_tokens=OUTPUT_TOKENS_PER_BLOCK)).encode()))
+    (trajectory / "audit.json").write_text(json.dumps(dict(complete=True, output_tokens=OUTPUT_TOKENS_PER_BLOCK,
+                                                           checkpoints={"1x": dict(correctness=dict(score=1))})))
     (arm / "audit.jsonl").write_text("test", encoding="utf-8")
     return root
 
 
 @pytest.fixture
-def upload_environment(monkeypatch: pytest.MonkeyPatch, output_artifacts: Path, hf_upload_api: Mock) -> None:
+def published_outputs(output_artifacts: Path, tmp_path: Path) -> Path:
+    """Export the native fixture once for upload tests, retaining its source artifacts."""
+    destination = tmp_path / "published"
+    ParquetTrajectoryExporter(output_artifacts, destination).export_trajectories(None)
+    return destination
+
+
+@pytest.fixture
+def upload_environment(monkeypatch: pytest.MonkeyPatch, published_outputs: Path, hf_upload_api: Mock) -> None:
     """Isolate uploader credentials, output paths, and dotenv loading."""
     monkeypatch.setenv("HF_DATASETS_REPO", "owner/problems")
     monkeypatch.setenv("HF_OUTPUTS_REPO", "owner/outputs")
     monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr("sys.argv", ["upload_outputs"])
     monkeypatch.setattr("discovery_execution.scripts.upload_outputs.load_dotenv", Mock())
-    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.OUTPUT_DIRECTORY", output_artifacts)
+    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.PUBLISHED_DIRECTORY", published_outputs)
     monkeypatch.setattr("discovery_execution.scripts.upload_outputs.HfApi", Mock(return_value=hf_upload_api))
 
 

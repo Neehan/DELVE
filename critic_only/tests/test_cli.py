@@ -1,7 +1,9 @@
 """Exercise setup, head/LoRA/full training, and evaluation without network or GPU dependencies."""
 
 import json
+import shutil
 import weakref
+from fnmatch import fnmatch
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +29,7 @@ from critic_only.cli import evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
+from discovery_execution.outputs.parquet_exporter import ParquetTrajectoryExporter
 
 
 @pytest.fixture
@@ -52,7 +55,7 @@ def temporary_dataset_lifetimes(monkeypatch: pytest.MonkeyPatch) -> None:
         """Check resource lifetimes before cleanup, including on filesystems that allow open-file deletion."""
         with TemporaryDirectory(*args, **kwargs) as directory:
             yield directory
-            assert references and all(reference() is None for reference in references)
+            assert all(reference() is None for reference in references)
 
     monkeypatch.setattr(Dataset, "from_generator", track_generated)
     monkeypatch.setattr(Dataset, "map", track_mapped)
@@ -121,18 +124,30 @@ def test_bad_training_fraction_fails_early(fraction: str, monkeypatch: pytest.Mo
     loader.assert_not_called()
 
 
+@pytest.mark.parametrize('source_kind', ['local', 'hf'])
 def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable[[str], CriticConfig],
-    tokenizer: PreTrainedTokenizerFast, monkeypatch: pytest.MonkeyPatch, temporary_dataset_lifetimes: None) -> None:
-    """Setup pins the model and saves token splits without generating hidden-state caches."""
+    tokenizer: PreTrainedTokenizerFast, monkeypatch: pytest.MonkeyPatch, temporary_dataset_lifetimes: None, source_kind: str) -> None:
+    """Setup retains processed/token shards, cleans only owned downloads, and reprocesses without downloading."""
     settings = critic_settings("ppo-critic")
     tokenizer.save_pretrained(settings.model)
     root = prepared_inputs.destination.parent / "processed"
-    api = Mock(); api.model_info.return_value.sha = "local"
+    published = prepared_inputs.destination.parent / "published"
+    ParquetTrajectoryExporter(prepared_inputs.outputs_directory, published).export_trajectories(None)
+    original_exports = {path: file_digest(path) for path in published.rglob('*.parquet')}
+    api = Mock(); api.model_info.return_value.sha = "local"; api.dataset_info.return_value.sha = 'output-commit'
+    def download(repository: str, **kwargs: Any) -> str:
+        """Populate the requested temporary directory with real exported fixture files."""
+        assert repository == 'owner/outputs'
+        shutil.copytree(published, kwargs['local_dir'], dirs_exist_ok=True)
+        return str(kwargs['local_dir'])
+    snapshot = Mock(side_effect=download)
+    monkeypatch.setattr(setup, 'snapshot_download', snapshot)
     monkeypatch.setattr(setup, "HfApi", Mock(return_value=api))
     monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
     monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", OUTPUT_TOKENS_PER_BLOCK)
     monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
-    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(prepared_inputs.outputs_directory),
+    source_args = ['--outputs-directory', str(published)] if source_kind == 'local' else ['--outputs-repo', 'owner/outputs', '--revision', 'main']
+    monkeypatch.setattr("sys.argv", ["setup", *source_args,
         "--datasets-directory", str(prepared_inputs.datasets_directory), "--destination", str(root), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
     setup.main()
     assert (root / "splits.parquet").is_file()
@@ -140,6 +155,11 @@ def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable
     assert not (root / "tiny" / "train" / "critic_only" / "hidden_states").exists()
     manifest = json.loads((root / "tiny" / "manifest.json").read_text())
     assert manifest["tokenization"]["complete"]
+    assert manifest['source_revision'] == ('owner/outputs@output-commit' if source_kind == 'hf' else None)
+    assert snapshot.call_count == int(source_kind == 'hf')
+    if source_kind == 'hf':
+        assert not snapshot.call_args.kwargs['local_dir'].exists()
+    assert all(file_digest(path) == digest for path, digest in original_exports.items())
     api.model_info.assert_called_once()
     raw_hashes = manifest["trajectories"]
     split_hash = file_digest(root / "splits.parquet")
@@ -152,6 +172,32 @@ def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable
     assert file_digest(root / "splits.parquet") == split_hash
     assert len(list((root / "tiny").glob("checkpoints-*.parquet"))) == 1
     api.model_info.assert_called_once()
+    assert snapshot.call_count == int(source_kind == 'hf')
+
+
+def test_failed_hf_download_cleans_only_temporary_files(prepared_inputs: CollectionFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An interrupted download leaves no processed dataset and does not touch existing local data."""
+    root = prepared_inputs.destination.parent / 'processed'
+    root.mkdir()
+    existing = root / 'keep.txt'
+    existing.write_text('existing data')
+    api = Mock(); api.dataset_info.return_value.sha = 'output-commit'
+    def interrupted(repository: str, **kwargs: Any) -> str:
+        """Write a partial setup-owned download, then simulate a network failure."""
+        assert repository == 'owner/outputs'
+        (kwargs['local_dir'] / 'partial.parquet').write_bytes(b'partial')
+        raise RuntimeError('download interrupted')
+    monkeypatch.setattr(setup, 'HfApi', Mock(return_value=api))
+    monkeypatch.setattr(setup, 'snapshot_download', interrupted)
+    monkeypatch.setattr(setup, 'tokenization_settings', Mock(return_value={}))
+    monkeypatch.setattr(setup, 'TRAIN_PROBLEMS', 1)
+    monkeypatch.setattr(setup, 'SUPPORTED_MODELS', {'tiny': 'unused'})
+    monkeypatch.setattr('sys.argv', ['setup', '--outputs-repo', 'owner/outputs', '--revision', 'main',
+        '--datasets-directory', str(prepared_inputs.datasets_directory), '--destination', str(root), '--solver-model', 'tiny'])
+    with pytest.raises(RuntimeError, match='download interrupted'):
+        setup.main()
+    assert list(root.iterdir()) == [existing]
+    assert existing.read_text() == 'existing data'
 
 
 @pytest.mark.parametrize("mode,count", [("lora", "0"), ("lora", "-1"), ("head", "1"), ("full", "0"), ("full", "-1")])
@@ -193,10 +239,16 @@ def test_pinned_hf_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     download = Mock(return_value=str(tmp_path))
     monkeypatch.setattr(setup, "HfApi", Mock(return_value=api))
     monkeypatch.setattr(setup, "snapshot_download", download)
-    root, revision = setup.download_outputs("owner/outputs", "main", "tiny")
+    root, revision = setup.download_outputs("owner/outputs", "main", "tiny", tmp_path)
     assert root == tmp_path and revision == "owner/outputs@commit"
     assert download.call_args.kwargs["revision"] == "commit"
+    assert download.call_args.kwargs['local_dir'] == tmp_path
     assert all("/tiny/" in pattern for pattern in download.call_args.kwargs["allow_patterns"])
+    patterns = download.call_args.kwargs['allow_patterns']
+    for arm in setup.CRITIC_TRAJECTORY_ARMS:
+        assert any(fnmatch(f'aime/2024/tiny/{arm}/seed_7.parquet', pattern) for pattern in patterns)
+        assert not any(fnmatch(f'aime/2024/tiny/{arm}/seed_8.parquet', pattern) for pattern in patterns)
+    assert not any(fnmatch('aime/2024/tiny/continue-at-1x/source_seed_0/seed_0.parquet', pattern) for pattern in patterns)
 
 
 @pytest.mark.parametrize("mode", ["full", "lora"])
@@ -323,7 +375,7 @@ def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokeniz
     from_path = prepared_inputs.outputs_directory
     root = prepared_inputs.destination.parent / "finer"
     sources = root / "raw"
-    for module in ("discovery_execution.processing.trajectory_processor", "critic_only.data.critic_input_processor",
+    for module in ("discovery_execution.outputs.models", "discovery_execution.outputs.native_reader", "critic_only.data.critic_input_processor",
                    "discovery_execution.processing.checkpoint_reconstructor"):
         monkeypatch.setattr(f"{module}.OUTPUT_TOKENS_PER_BLOCK", 8)
     for path in from_path.rglob("meta.json"):
@@ -339,7 +391,9 @@ def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokeniz
     monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
     monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
     monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", 4)
-    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(sources), "--destination", str(root / "processed"),
+    published = root / "published"
+    ParquetTrajectoryExporter(sources, published).export_trajectories(None)
+    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(published), "--destination", str(root / "processed"),
         "--datasets-directory", str(prepared_inputs.datasets_directory), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
     setup.main()
     directory = root / "processed" / "tiny"

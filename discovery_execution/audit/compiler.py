@@ -10,6 +10,7 @@ from discovery_execution.audit.answer_grader import validate_grading_rule
 from discovery_execution.audit.models import AuditRecord
 from discovery_execution.harness.constants import AUDIT_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME
 from discovery_execution.harness.storage import atomic_write
+from discovery_execution.outputs.audit_records import iter_audit_records
 
 
 class AuditCompiler:
@@ -36,16 +37,7 @@ class AuditCompiler:
             settings = json.loads((path.parent / META_FILENAME).read_text(encoding="utf-8"))
             result = json.loads(path.read_text(encoding="utf-8"))
             self._validate_audit(path, settings, result)
-            identity = {
-                "dataset": f"{settings['competition']}/{settings['year']}", "solver_model": settings["model"],
-                **{key: settings[key] for key in ("experiment", "compute_multiplier_k", "inject_sketch_at",
-                                                 "solution_index", "problem_id", "seed")},
-            }
-            if "continue_at" in settings:
-                identity.update({key: settings[key] for key in ("source_arm", "source_seed", "continue_at")})
-            for label, checkpoint in result["checkpoints"].items():
-                rows.append(AuditRecord(**identity, checkpoint_multiplier_k=int(label.removesuffix("x")),
-                                        correctness=checkpoint["correctness"]))
+            rows.extend(iter_audit_records(settings, result))
         return sorted(rows, key=lambda row: (row.problem_id, row.source_seed if row.source_seed is not None else -1,
                                              row.seed, row.checkpoint_multiplier_k))
 

@@ -1,6 +1,6 @@
 """Prepare local training data from saved, audited solver trajectories.
 
-Download and pack outputs once, or reuse the packed trajectories with --reprocess. Reconstruct analysis checkpoints, then save critic token inputs with matching references. Reprocessing replaces derived files only; no Qwen weights are loaded and nothing is uploaded.
+Download outputs temporarily and retain processed trajectory shards, or reuse those shards with --reprocess. Reconstruct analysis checkpoints, then save separate critic token inputs with matching references. Reprocessing replaces derived files only; no Qwen weights are loaded and nothing is uploaded.
 """
 
 import argparse
@@ -16,7 +16,7 @@ from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
 from discovery_execution.audit.constants import GRADING_RULE
-from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, TRAJECTORY_SEEDS
+from critic_only.constants import DEFAULT_HORIZON, DEFAULT_MAX_LENGTH, CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, CRITIC_TARGET, INPUT_PREFIX_BLOCKS, TRAJECTORY_SEEDS, CRITIC_TRAJECTORY_ARMS
 from critic_only.data.models import PreparationConfig
 from critic_only.data.critic_input_processor import CriticInputProcessor
 from critic_only.data.tokenizer import PrefixTokenizer
@@ -26,7 +26,7 @@ from discovery_execution.processing.checkpoint_reconstructor import CheckpointRe
 from discovery_execution.processing.storage import read_manifest, write_json_atomic, write_parquet_atomic, file_digest
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, META_FILENAME,
+    DATASETS_DIRECTORY,
     SUPPORTED_MODELS, MAX_BLOCKS,
 )
 from discovery_execution.processing.constants import (PROCESSED_DIRECTORY, TRAIN_PROBLEMS, CHECKPOINT_INTERVAL_TOKENS,
@@ -35,13 +35,14 @@ from discovery_execution.processing.trajectory_processor import TrajectoryProces
 from discovery_execution.processing.problem_splits import ProblemSplits
 
 
-def download_outputs(repository: str, revision: str, solver: str) -> tuple[Path, str]:
-    """Download one solver's raw output files at a fixed Hugging Face commit.
+def download_outputs(repository: str, revision: str, solver: str, directory: Path) -> tuple[Path, str]:
+    """Download one solver's published Parquet banks at a fixed Hugging Face commit.
 
     Args:
         repository: Hugging Face dataset repository containing solver outputs.
         revision: Requested repository revision, resolved to an immutable commit before downloading.
         solver: Solver identifier used in the output directory structure.
+        directory: Setup-owned temporary directory; avoids retaining another copy in the shared HF cache.
 
     Returns:
         tuple[Path, str]: Local snapshot directory and its repository@commit identifier.
@@ -49,9 +50,8 @@ def download_outputs(repository: str, revision: str, solver: str) -> tuple[Path,
     resolved = HfApi().dataset_info(repository, revision=revision).sha
     if resolved is None:
         raise ValueError("HF output revision could not be resolved")
-    names = [META_FILENAME, CONVERSATION_FILENAME, AUDIT_FILENAME, CHECKPOINT_FILENAME.format(k="*")]
-    patterns = [f"*/*/{solver}/**/{name}" for name in names]
-    root = Path(snapshot_download(repository, repo_type="dataset", revision=resolved, allow_patterns=patterns))
+    patterns = [f"*/*/{solver}/{arm}/seed_{seed}.parquet" for arm in CRITIC_TRAJECTORY_ARMS for seed in TRAJECTORY_SEEDS]
+    root = Path(snapshot_download(repository, repo_type="dataset", revision=resolved, allow_patterns=patterns, local_dir=directory))
     return root, f"{repository}@{resolved}"
 
 
@@ -198,11 +198,14 @@ def main() -> None:
     directory = args.destination / args.solver_model
     if not args.reprocess:
         splits = ProblemSplits(args.datasets_directory, args.destination, TRAIN_PROBLEMS)
-        source, revision = args.outputs_directory, None
-        if args.outputs_repo:
-            source, revision = download_outputs(args.outputs_repo, args.revision, args.solver_model)
-        processor = TrajectoryProcessor(source, directory, args.solver_model, splits)
-        processor.compile_trajectories(revision, TRAJECTORY_SEEDS)
+        args.destination.mkdir(parents=True, exist_ok=True)
+        # Only setup-owned downloads are temporary; user-supplied local exports remain untouched.
+        with TemporaryDirectory(dir=args.destination) as temporary:
+            source, revision = args.outputs_directory, None
+            if args.outputs_repo:
+                source, revision = download_outputs(args.outputs_repo, args.revision, args.solver_model, Path(temporary))
+            processor = TrajectoryProcessor(source, directory, args.solver_model, splits)
+            processor.compile_trajectories(revision, TRAJECTORY_SEEDS, CRITIC_TRAJECTORY_ARMS)
         # Pin the tokenizer before reconstruction so a failed first preparation can be retried with --reprocess.
         manifest = read_manifest(directory)
         manifest["tokenization"] = {"settings": settings, "complete": False, "shards": {}}

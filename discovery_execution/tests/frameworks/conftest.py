@@ -5,7 +5,7 @@ from typing import Literal
 
 import pytest
 
-from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
+from discovery_execution.tests.frameworks.banks import write_records
 from discovery_execution.audit.models import AuditRecord, BinaryGrade
 from discovery_execution.frameworks.models import InputSelection
 from discovery_execution.frameworks.runner import FrameworkRunner
@@ -43,10 +43,10 @@ def banks(tmp_path: Path) -> Path:
                                                experiment=experiment, compute_multiplier_k=horizon, inject_sketch_at=injection,
                                                solution_index=0, problem_id=observation.problem_id, seed=seed,
                                                checkpoint_multiplier_k=checkpoint, correctness=BinaryGrade(score=1 if seed < count else 0)))
-        (directory / COMPILED_AUDIT_FILENAME).write_text("".join(row.model_dump_json() + "\n" for row in records))
+        write_records(directory, [row.model_dump() for row in records])
     for arm in ("unaided-8x", "oracle-at-7x-execution"):
         (root / arm).mkdir()
-        (root / arm / COMPILED_AUDIT_FILENAME).write_text("not a fitting input\n")
+        (root / arm / "seed_0.parquet").write_text("not a fitting input\n")
     return tmp_path / "output"
 
 

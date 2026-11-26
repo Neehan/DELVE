@@ -2,11 +2,15 @@
 
 import json
 from dataclasses import asdict
+from collections.abc import Iterator
+from typing import Any
 from pathlib import Path
 
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
+from discovery_execution.tests.frameworks.banks import read_records, write_records
 from discovery_execution.frameworks.models import InputSelection
 from discovery_execution.frameworks.runner import FrameworkRunner
 from discovery_execution.frameworks.utils.constants import FIT_FILENAME, ORACLE_ARM, PREDICTIONS_FILENAME, SHORT_ARM, TOTAL_BUDGET
@@ -22,36 +26,39 @@ def test_loader_uses_all_complete_seeds(data_loader: DataLoader, selection: Inpu
 
 def test_loader_pools_solution_mixtures(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Different seeds and problems can use different sketches without losing audited outcomes."""
-    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    path = banks / DATASET / MODEL / ORACLE_ARM
+    rows = read_records(path)
     for row in rows:
         row["solution_index"] = row["seed"] % 3
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    write_records(path, rows)
     assert [asdict(row) for row in data_loader.load(selection)] == [asdict(row) for row in ROWS]
 
 
-def test_loader_rejects_changed_sketch_within_trajectory(banks: Path, data_loader: DataLoader,
-                                                       selection: InputSelection) -> None:
-    """A trajectory must retain one selected sketch across all checkpoint rows."""
-    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    rows[0]["solution_index"] = 1
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    with pytest.raises(ValueError, match="solution index changes within a trajectory"):
-        data_loader.load(selection)
+def test_loader_projects_audit_columns(banks: Path, data_loader: DataLoader, selection: InputSelection,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """DE fitting must not load the potentially large conversation column."""
+    original = pq.ParquetFile.iter_batches
+    projections = []
+    def observed(self: pq.ParquetFile, *args: Any, **kwargs: Any) -> Iterator[pa.RecordBatch]:
+        """Capture projected columns while delegating actual reads to Arrow."""
+        projections.append(kwargs["columns"])
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed)
+    data_loader.load(selection)
+    assert projections and all("conversation" not in columns for columns in projections)
 
 
 def test_framework_retains_earlier_success(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Convert raw checkpoint regressions to cumulative counts without changing the audit file."""
-    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    path = banks / DATASET / MODEL / ORACLE_ARM
+    rows = read_records(path)
     for row in rows:
         if row["problem_id"] == "p1" and row["seed"] == 0 and row["checkpoint_multiplier_k"] > 1:
             row["correctness"]["score"] = 0
-    content = "".join(json.dumps(row) + "\n" for row in rows)
-    path.write_text(content)
+    write_records(path, rows)
+    content = read_records(path)
     assert data_loader.load(selection)[0].oracle_successes == ROWS[0].oracle_successes
-    assert path.read_text() == content
+    assert read_records(path) == content
 
 
 @pytest.mark.parametrize("field,value", [
@@ -61,30 +68,31 @@ def test_framework_retains_earlier_success(banks: Path, data_loader: DataLoader,
 def test_loader_rejects_wrong_identity_or_nonbinary_grade(field: str, value: object, banks: Path,
                                                           data_loader: DataLoader, selection: InputSelection) -> None:
     """Misplaced or malformed oracle rows cannot silently change the execution estimate."""
-    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    path = banks / DATASET / MODEL / ORACLE_ARM
+    rows = read_records(path)
     rows[0][field] = value
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    write_records(path, rows)
     with pytest.raises(ValueError):
         data_loader.load(selection)
 
 
 def test_loader_rejects_duplicates(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """Duplicate checkpoint rows must not double-count successful seeds."""
-    path = banks / DATASET / MODEL / SHORT_ARM / COMPILED_AUDIT_FILENAME
-    with path.open("a") as handle:
-        handle.write(path.read_text().splitlines()[0] + "\n")
+    path = banks / DATASET / MODEL / SHORT_ARM
+    bank = path / "seed_0.parquet"
+    table = pq.ParquetFile(bank).read()
+    pq.write_table(pa.concat_tables([table, table.slice(0, 1)]), bank)
     with pytest.raises(ValueError, match="duplicate"):
         data_loader.load(selection)
 
 
 def test_incomplete_seed_is_excluded(banks: Path, data_loader: DataLoader, selection: InputSelection) -> None:
     """A partially audited oracle seed is neither a success nor a failure observation."""
-    path = banks / DATASET / MODEL / ORACLE_ARM / COMPILED_AUDIT_FILENAME
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    path = banks / DATASET / MODEL / ORACLE_ARM
+    rows = read_records(path)
     rows = [row for row in rows if not (row["problem_id"] == "p1" and row["seed"] == 0
                                        and row["checkpoint_multiplier_k"] == TOTAL_BUDGET)]
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    write_records(path, rows)
     observation = data_loader.load(selection)[0]
     assert observation.oracle_attempts == ROWS[0].oracle_attempts - 1
     assert observation.oracle_successes == [count - 1 for count in ROWS[0].oracle_successes]

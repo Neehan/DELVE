@@ -9,6 +9,7 @@ from discovery_execution.frameworks.runner import FrameworkRunner
 from discovery_execution.frameworks.utils.constants import FRAMEWORK_NAMES
 from discovery_execution.frameworks.utils.dataloader import DataLoader
 from discovery_execution.harness.constants import COMPETITIONS, FAILURE_EXIT_CODE, LOG_FORMAT, OUTPUT_DIRECTORY, SUPPORTED_MODELS
+from discovery_execution.outputs.constants import PUBLISHED_DIRECTORY
 
 
 def parse_arguments(arguments: list[str]) -> InputSelection:
@@ -29,7 +30,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     selection = parse_arguments(sys.argv[1:])
     try:
-        runner = FrameworkRunner(DataLoader(OUTPUT_DIRECTORY), OUTPUT_DIRECTORY)
+        runner = FrameworkRunner(DataLoader(PUBLISHED_DIRECTORY), OUTPUT_DIRECTORY)
         for path in runner.run(selection):
             logging.info("Saved %s", path)
     except (ValueError, OSError, RuntimeError, ArithmeticError) as error:

@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from discovery_execution.harness.models import Checkpoint, RunState
-from discovery_execution.processing.constants import HASH_CHUNK_BYTES, MANIFEST_FILENAME, PARQUET_COMPRESSION, PARQUET_SHARD_BYTES
+from discovery_execution.processing.constants import HASH_CHUNK_BYTES, MANIFEST_FILENAME, PARQUET_COMPRESSION
 
 
 def file_digest(path: Path) -> str:
@@ -59,34 +58,6 @@ def write_parquet_atomic(path: Path, table: pa.Table) -> None:
     temporary = path.with_suffix(".tmp")
     pq.write_table(table, temporary, compression=PARQUET_COMPRESSION)
     temporary.replace(path)
-
-
-def write_parquet_shards(rows: Iterable[dict[str, Any]], directory: Path) -> dict[str, str]:
-    """Group trajectory rows into files near the configured size and record their hashes.
-
-    Args:
-        rows: Iterable of complete trajectory dictionaries to serialize.
-        directory: Destination for numbered part-*.parquet files.
-
-    Returns:
-        dict[str, str]: Written filenames mapped to SHA-256 digests; files are grouped by approximate serialized byte size.
-    """
-    pending: list[dict[str, Any]] = []
-    size, index = 0, 0
-    checksums = {}
-    for row in rows:
-        pending.append(row)
-        size += len(json.dumps(row).encode())
-        if size >= PARQUET_SHARD_BYTES:
-            path = directory / f"part-{index:05d}.parquet"
-            write_parquet_atomic(path, pa.Table.from_pylist(pending))
-            checksums[path.name] = file_digest(path)
-            pending, size, index = [], 0, index + 1
-    if pending:
-        path = directory / f"part-{index:05d}.parquet"
-        write_parquet_atomic(path, pa.Table.from_pylist(pending))
-        checksums[path.name] = file_digest(path)
-    return checksums
 
 
 def checkpoint_snapshot(state: RunState, checkpoint: Checkpoint) -> dict[str, Any]:

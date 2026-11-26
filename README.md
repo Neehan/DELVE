@@ -122,7 +122,9 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 --mo
 
 Use `--experiment continue-oracle` to inject a sketch at that same prefix; its default solution is selected by the source seed, shared across branches. The 5× default budget includes the prefix. Outputs use `<arm>/<problem>/seed_<source-seed>/branch_<seed>/`, with arms `continue-at-1x` or `continue-oracle-at-1x`. Only post-fork checkpoints are saved, on the original timeline. Audit accepts the same source selectors; continuation arms are excluded from DE fitting. Reusing a branch directory with different source settings or budget fails.
 
-After generation and auditing finish, run `bash discovery_execution/scripts/upload_outputs.sh` from a network-enabled shell. It uploads these artifacts to `HF_OUTPUTS_REPO`, preserving paths below `output/` and excluding locks and temporary files. A missing repository is created private; existing visibility is unchanged. Rerunning updates matching paths without deleting remote-only files.
+After generation and auditing finish, export once with `uv run python -m discovery_execution.scripts.export_outputs --source output --destination data/outputs/published`, then upload with `bash discovery_execution/scripts/upload_outputs.sh`. Use `--seeds 0 1 2 3 4 5 6 7` when later seeds are unfinished. Critic setup and DE fitting read these same Parquet files; native files remain local for resuming.
+
+Each file contains one seed across problems: `<competition>/<year>/<model>/<arm>/seed_<n>.parquet`; branches add `source_seed_<parent>/`. Reruns reuse unchanged exports and may add problems, seeds or models. Export and upload reject removed or changed existing trajectories; use a new destination/repository for intentional revisions. Upload skips unchanged files and checks the remote revision before committing.
 
 On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
 
@@ -134,7 +136,7 @@ Grades use DE's `correctness.score` field, restricted to 0 or 1. Math-Verify che
 
 **Fit the frameworks**
 
-SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. Fit from audited `unaided-1x` and `oracle-at-0x-execution` arms under the selected model:
+SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. They read only grades and metadata from the exported `unaided-1x` and `oracle-at-0x-execution` Parquet files in `data/outputs/published/`:
 
 ```bash
 uv run python -m discovery_execution.cli.frameworks --competition aime --year 2024 \

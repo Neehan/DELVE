@@ -66,6 +66,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
 
 def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[str, str]]], outcomes: list[int]) -> None:
     """Save real checkpoint boundaries and later conversation text for processor integration tests."""
+    metadata = {**metadata, "arm": path.parents[2].name if "continue_at" in metadata else path.parents[1].name}
     path.mkdir(parents=True)
     (path / "meta.json").write_text(json.dumps(metadata))
     fork = metadata.get("continue_at", 0)
@@ -92,6 +93,7 @@ def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[st
 def prepared_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CollectionFixture:
     """Save root and forked runs with distinct observed reasoning and later correct-to-incorrect revisions."""
     monkeypatch.setattr("critic_only.data.critic_input_processor.DEFAULT_BLOCKS", 3)
+    monkeypatch.setattr("critic_only.cli.setup.CRITIC_TRAJECTORY_ARMS", ("unaided-3x", "oracle-at-0x-execution"))
     root = tmp_path / "outputs"
     references = tmp_path / "datasets" / "aime"
     references.mkdir(parents=True)
@@ -106,7 +108,8 @@ def prepared_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Collecti
         messages = [{"role": "user", "content": "Find the number."}, {"role": "assistant", "content": "Thinking"}]
         for condition in ("unaided", "oracle-execution"):
             for seed in range(8):
-                directory = model_root / f"{condition}-3x" / problem["problem_id"] / f"seed_{seed}"
+                arm = "unaided-3x" if condition == "unaided" else "oracle-at-0x-execution"
+                directory = model_root / arm / problem["problem_id"] / f"seed_{seed}"
                 metadata = {**common, "experiment": condition, "seed": seed, "inject_sketch_at": 0, "solution_index": 0}
                 history = [{"role": "user", "content": "Find the number."}]
                 if condition == "oracle-execution":
