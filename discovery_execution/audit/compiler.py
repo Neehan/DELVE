@@ -10,7 +10,7 @@ from discovery_execution.audit.answer_grader import validate_grading_rule
 from discovery_execution.audit.models import AuditRecord
 from discovery_execution.harness.constants import AUDIT_FILENAME, LOCK_FILENAME, OUTPUT_TOKENS_PER_BLOCK, META_FILENAME
 from discovery_execution.harness.storage import atomic_write
-from discovery_execution.outputs.audits import audit_records
+from discovery_execution.outputs.audit_records import iter_audit_records
 
 
 class AuditCompiler:
@@ -37,7 +37,7 @@ class AuditCompiler:
             settings = json.loads((path.parent / META_FILENAME).read_text(encoding="utf-8"))
             result = json.loads(path.read_text(encoding="utf-8"))
             self._validate_audit(path, settings, result)
-            rows.extend(audit_records(settings, result))
+            rows.extend(iter_audit_records(settings, result))
         return sorted(rows, key=lambda row: (row.problem_id, row.source_seed if row.source_seed is not None else -1,
                                              row.seed, row.checkpoint_multiplier_k))
 

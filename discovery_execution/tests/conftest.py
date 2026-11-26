@@ -19,12 +19,16 @@ from discovery_execution.harness.models import BackendConfig, Checkpoint, Datase
 from discovery_execution.harness.openai_client import OpenAIClient
 from discovery_execution.harness.runner import Runner
 from discovery_execution.cli.run import backend_configuration, parse_arguments
+from discovery_execution.outputs.parquet_exporter import ParquetTrajectoryExporter
 
 
 @pytest.fixture
 def hf_upload_api() -> Mock:
     """Capture upload operations without contacting Hugging Face."""
-    return Mock()
+    api = Mock()
+    api.dataset_info.return_value.sha = "checked-revision"
+    api.dataset_info.return_value.siblings = []
+    return api
 
 
 @pytest.fixture
@@ -53,13 +57,22 @@ def output_artifacts(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def upload_environment(monkeypatch: pytest.MonkeyPatch, output_artifacts: Path, hf_upload_api: Mock) -> None:
+def published_outputs(output_artifacts: Path, tmp_path: Path) -> Path:
+    """Export the native fixture once for upload tests, retaining its source artifacts."""
+    destination = tmp_path / "published"
+    ParquetTrajectoryExporter(output_artifacts, destination).export_trajectories(None)
+    return destination
+
+
+@pytest.fixture
+def upload_environment(monkeypatch: pytest.MonkeyPatch, published_outputs: Path, hf_upload_api: Mock) -> None:
     """Isolate uploader credentials, output paths, and dotenv loading."""
     monkeypatch.setenv("HF_DATASETS_REPO", "owner/problems")
     monkeypatch.setenv("HF_OUTPUTS_REPO", "owner/outputs")
     monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr("sys.argv", ["upload_outputs"])
     monkeypatch.setattr("discovery_execution.scripts.upload_outputs.load_dotenv", Mock())
-    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.OUTPUT_DIRECTORY", output_artifacts)
+    monkeypatch.setattr("discovery_execution.scripts.upload_outputs.PUBLISHED_DIRECTORY", published_outputs)
     monkeypatch.setattr("discovery_execution.scripts.upload_outputs.HfApi", Mock(return_value=hf_upload_api))
 
 

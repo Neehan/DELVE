@@ -8,16 +8,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from discovery_execution.audit.models import AuditRecord
+from discovery_execution.audit.constants import GRADING_RULE
 from discovery_execution.harness.models import Checkpoint, RunState
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
-from discovery_execution.outputs.bank import OutputBank
+from discovery_execution.outputs.parquet_reader import ParquetTrajectoryReader
 from discovery_execution.outputs.constants import SCHEMA
 from discovery_execution.outputs.models import Trajectory
 
 
 def read_records(directory: Path) -> list[dict]:
     """Expose checkpoint records so tests can alter observations independently of Parquet encoding."""
-    return [row.model_dump() for row in OutputBank(directory.parents[3]).iter_audits(directory)]
+    return [row.model_dump() for row in ParquetTrajectoryReader(directory.parents[3]).iter_audits(directory)]
 
 
 def write_records(directory: Path, records: list[dict]) -> None:
@@ -37,7 +38,7 @@ def write_records(directory: Path, records: list[dict]) -> None:
                          output_tokens=first['compute_multiplier_k'] * OUTPUT_TOKENS_PER_BLOCK,
                          phase='solve', injected=first['experiment']=='oracle-execution', response_finished=True,
                          requests=[], checkpoints=boundaries)
-        audit = dict(complete=True, output_tokens=state.output_tokens,
+        audit = dict(grading_rule=GRADING_RULE, complete=True, output_tokens=state.output_tokens,
                      checkpoints={f"{row['checkpoint_multiplier_k']}x": dict(correctness=row['correctness']) for row in curve})
         identity = (directory / problem / f'seed_{seed}').relative_to(directory.parents[3]).as_posix()
         valid = {**metadata, 'competition': directory.parents[2].name,

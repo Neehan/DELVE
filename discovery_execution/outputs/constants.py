@@ -7,6 +7,7 @@ import pyarrow as pa
 FORMAT_VERSION = b"1"
 FORMAT_METADATA = {b"delve.outputs.version": FORMAT_VERSION}
 PUBLISHED_DIRECTORY = Path("data/outputs/published")
+EXPORT_SEEDS: tuple[int, ...] | None = None
 COMPRESSION = "zstd"
 ROW_GROUP_SIZE = 16
 BATCH_SIZE = 16

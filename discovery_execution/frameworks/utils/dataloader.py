@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from discovery_execution.outputs.bank import OutputBank
+from discovery_execution.outputs.parquet_reader import ParquetTrajectoryReader
 from discovery_execution.frameworks.models import InputSelection, Observation
 from discovery_execution.frameworks.utils.constants import MIN_AUDIT_SCORE, MIN_ORACLE_SEEDS, MIN_SHORT_SEEDS, ORACLE_ARM, SHORT_ARM, TOTAL_BUDGET
 
@@ -46,7 +46,7 @@ class DataLoader:
         path = directory
         runs: dict[str, dict[int, dict[int, bool]]] = {}
         solution_indices: dict[tuple[str, int], int] = {}
-        for row in OutputBank(self.results).iter_audits(directory):
+        for row in ParquetTrajectoryReader(self.results).iter_audits(directory):
             if row.experiment not in ("unaided", "oracle-execution"):
                 raise ValueError(f"continuation audits cannot be used for root DE fitting: {path}")
             arm = f"unaided-{row.compute_multiplier_k}x" if row.experiment == "unaided" else f"oracle-at-{row.inject_sketch_at}x-execution"

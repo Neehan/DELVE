@@ -7,11 +7,12 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from discovery_execution.audit.answer_grader import validate_grading_rule
-from discovery_execution.outputs.bank import OutputBank
+from discovery_execution.outputs.parquet_reader import ParquetTrajectoryReader
 from discovery_execution.outputs.models import Trajectory
 from discovery_execution.processing.constants import MANIFEST_FILENAME, SPLITS, TRAJECTORIES_SUBDIRECTORY
 from discovery_execution.processing.problem_splits import ProblemSplits
-from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_shards
+from discovery_execution.processing.storage import file_digest, write_json_atomic
+from discovery_execution.processing.trajectory_shard_writer import TrajectoryShardWriter
 
 
 class TrajectoryProcessor:
@@ -22,17 +23,20 @@ class TrajectoryProcessor:
         self.source, self.destination = source, destination
         self.solver_model, self.splits = solver_model, splits
 
-    def compile_trajectories(self, source_revision: str | None, seeds: tuple[int, ...]) -> None:
-        """Stream selected seeds into fixed splits without keeping the whole corpus in memory."""
+    def compile_trajectories(self, source_revision: str | None, seeds: tuple[int, ...], arms: tuple[str, ...] | None) -> None:
+        """Read seeds and arms once into fixed splits, recording source_revision; None selects every arm."""
         if self.destination.exists():
             raise FileExistsError(self.destination)
         self.destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=self.destination.parent) as temporary:
             staging = Path(temporary) / self.solver_model
             staging.mkdir()
+            writers = {split: TrajectoryShardWriter(staging / split / TRAJECTORIES_SUBDIRECTORY) for split in SPLITS}
+            for row in self._rows(seeds, arms):
+                writers[row["split"]].append(row)
             checksums = {}
-            for split in SPLITS:
-                shards = write_parquet_shards(self._rows(split, seeds), staging / split / TRAJECTORIES_SUBDIRECTORY)
+            for split, writer in writers.items():
+                shards = writer.finish()
                 checksums.update({f"{split}/{TRAJECTORIES_SUBDIRECTORY}/{name}": digest for name, digest in shards.items()})
             if not checksums:
                 raise ValueError("no trajectories for selected model and seeds")
@@ -42,13 +46,12 @@ class TrajectoryProcessor:
             write_json_atomic(staging / MANIFEST_FILENAME, manifest)
             staging.rename(self.destination)
 
-    def _rows(self, split: str, seeds: tuple[int, ...]) -> Iterator[dict[str, Any]]:
-        """Select a problem's existing split while reading bounded trajectory batches."""
-        for trajectory in OutputBank(self.source).iter_trajectories(self.solver_model, seeds):
+    def _rows(self, seeds: tuple[int, ...], arms: tuple[str, ...] | None) -> Iterator[dict[str, Any]]:
+        """Yield rows for seeds and arms, assigning each problem to its saved split in one pass."""
+        for trajectory in ParquetTrajectoryReader(self.source).iter_trajectories(self.solver_model, seeds, arms):
             metadata = json.loads(trajectory.metadata)
             key = f"{metadata['competition']}/{metadata['year']}/{metadata['problem_id']}"
-            if self.splits.assignments[key] == split:
-                yield self._trajectory_row(trajectory, split, key)
+            yield self._trajectory_row(trajectory, self.splits.assignments[key], key)
 
     def _trajectory_row(self, trajectory: Trajectory, split: str, key: str) -> dict[str, Any]:
         """Retain raw audit policy and conversation boundaries for downstream token reconstruction."""

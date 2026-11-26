@@ -3,9 +3,13 @@
 import hashlib
 import json
 import shutil
+from collections import Counter
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
+import pyarrow as pa
 import zstandard
 from datasets import Dataset
 from tokenizers import Tokenizer
@@ -21,20 +25,22 @@ from critic_only.data.critic_input_processor import CriticInputProcessor, is_inp
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
-from discovery_execution.outputs.packer import OutputPacker
+from discovery_execution.outputs.parquet_exporter import ParquetTrajectoryExporter
+from discovery_execution.outputs.parquet_reader import ParquetTrajectoryReader
 from discovery_execution.processing.checkpoint_reconstructor import CheckpointReconstructor
 from discovery_execution.processing.problem_splits import ProblemSplits
 from discovery_execution.audit.answer_grader import AnswerGrader
 from discovery_execution.audit.constants import CRITIQUE_PROMPT_PATH
 from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
+from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
 
 
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     """Compile real raw artifacts, then select critic inputs from the shared Parquet collection."""
     splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
     published = config.destination.parent / "published"
-    OutputPacker(config.outputs_directory, published).pack(TRAJECTORY_SEEDS)
-    TrajectoryProcessor(published, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS)
+    ParquetTrajectoryExporter(config.outputs_directory, published).export_trajectories(TRAJECTORY_SEEDS)
+    TrajectoryProcessor(published, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS, None)
     backend = Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     backend.pre_tokenizer = Whitespace()
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
@@ -57,6 +63,88 @@ def test_exact_fixed_splits(prepared_inputs: CollectionFixture) -> None:
     assert recreated.assignments == splits.assignments
     with pytest.raises(ValueError, match="size differs"):
         ProblemSplits(prepared_inputs.datasets_directory, folder, 2)
+
+
+def test_processing_reads_selected_files_once(prepared_inputs: CollectionFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route rows to fixed splits in one pass and skip branch/extra-seed files before decoding."""
+    config = prepared_inputs
+    published = config.destination.parent / 'published'
+    ParquetTrajectoryExporter(config.outputs_directory, published).export_trajectories(None)
+    splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
+    reads: Counter[Path] = Counter()
+    original = ParquetTrajectoryReader._read_rows
+    def observed(self: ParquetTrajectoryReader, path: Path, columns: list[str] | None) -> Iterator[dict[str, Any]]:
+        """Count each opened file while retaining actual Arrow decoding."""
+        reads[path] += 1
+        yield from original(self, path, columns)
+    monkeypatch.setattr(ParquetTrajectoryReader, '_read_rows', observed)
+    TrajectoryProcessor(published, config.destination, config.solver_model, splits).compile_trajectories(
+        'fixture', (0, 1), ('unaided-3x', 'oracle-at-0x-execution'))
+    assert len(reads) == 8 and set(reads.values()) == {1}
+    manifest = json.loads((config.destination / 'manifest.json').read_text())
+    rows = []
+    for name, digest in manifest['trajectories'].items():
+        path = config.destination / name
+        assert file_digest(path) == digest
+        rows.extend(Dataset.from_parquet(str(path)).to_list())
+    assert len(rows) == 8
+    assert all(row['split'] == splits.assignments[row['problem_key']] for row in rows)
+    assert all('continue' not in row['trajectory_id'] for row in rows)
+
+
+def test_arm_filter_preserves_critic_examples(prepared_inputs: CollectionFixture) -> None:
+    """Early arm selection changes storage work, not the resulting histories, references, splits or labels."""
+    original = compile_fixture(prepared_inputs)
+    expected = list(original.iter_inputs())
+    directory = prepared_inputs.destination.parent / 'filtered'
+    splits = ProblemSplits(prepared_inputs.datasets_directory, directory.parent, 1)
+    TrajectoryProcessor(directory.parent / 'published', directory, prepared_inputs.solver_model, splits).compile_trajectories(
+        'fixture', TRAJECTORY_SEEDS, ('unaided-3x', 'oracle-at-0x-execution'))
+    filtered = CriticInputProcessor(PreparationConfig(source_directory=directory, horizon=prepared_inputs.horizon),
+        original.checkpoint_builder)
+    assert list(filtered.iter_inputs()) == expected
+
+
+def write_native_reference_collection(config: CollectionFixture, destination: Path) -> None:
+    """Reproduce the pre-migration raw-file rows independently of the new exporters and readers."""
+    splits = ProblemSplits(config.datasets_directory, destination.parent, 1)
+    rows = []
+    for path in sorted(config.outputs_directory.rglob('meta.json')):
+        metadata = json.loads(path.read_text())
+        if metadata['seed'] not in TRAJECTORY_SEEDS:
+            continue
+        key = f"{metadata['competition']}/{metadata['year']}/{metadata['problem_id']}"
+        rows.append({'trajectory_id': path.parent.relative_to(config.outputs_directory).as_posix(),
+            'problem_key': key, 'split': splits.assignments[key], 'metadata': path.read_text(),
+            'conversation': zstandard.decompress((path.parent / 'conversation.json.zst').read_bytes()).decode(),
+            'audit': (path.parent / 'audit.json').read_text(), 'problem': splits.problems[key].model_dump_json()})
+    checksums = {}
+    for split in sorted(set(splits.assignments.values())):
+        selected = [row for row in rows if row['split'] == split]
+        if selected:
+            path = destination / split / 'trajectories' / 'part-00000.parquet'
+            write_parquet_atomic(path, pa.Table.from_pylist(selected))
+            checksums[path.relative_to(destination).as_posix()] = file_digest(path)
+    write_json_atomic(destination / 'manifest.json', {'solver_model': config.solver_model,
+        'source_revision': 'fixture', 'split_sha256': file_digest(splits.path), 'trajectories': checksums})
+
+
+def test_native_and_parquet_produce_identical_training_inputs(prepared_inputs: CollectionFixture,
+    tokenizer: PreTrainedTokenizerFast, encoding_settings: dict[str, Any]) -> None:
+    """Compare every critic example and encoded field against direct native-file processing by stable ID."""
+    migrated = compile_fixture(prepared_inputs)
+    native_directory = prepared_inputs.destination.parent / 'native-reference'
+    write_native_reference_collection(prepared_inputs, native_directory)
+    native = CriticInputProcessor(PreparationConfig(source_directory=native_directory, horizon=prepared_inputs.horizon),
+        migrated.checkpoint_builder)
+    expected = {row['prefix_id']: row for row in native.iter_inputs()}
+    actual = {row['prefix_id']: row for row in migrated.iter_inputs()}
+    assert actual == expected
+    formatter = PrefixTokenizer(tokenizer)
+    for identity, row in expected.items():
+        assert formatter.encode(actual[identity], encoding_settings) == formatter.encode(row, encoding_settings)
+    assert {row['trajectory_id']: row for row in native.checkpoint_rows} == {
+        row['trajectory_id']: row for row in migrated.checkpoint_rows}
 
 
 def test_training_subsets_keep_problem_groups() -> None:

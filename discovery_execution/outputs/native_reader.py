@@ -1,4 +1,4 @@
-"""Validate local resumable output files before packing them for publication."""
+"""Read a harness run's metadata, conversation and grades, and check its saved snapshots."""
 
 import json
 from pathlib import Path
@@ -10,15 +10,18 @@ from discovery_execution.harness.models import RunState
 from discovery_execution.outputs.models import Trajectory
 
 
-class NativeReader:
-    """Read complete native runs; require every saved snapshot to match the final conversation."""
+class NativeTrajectoryReader:
+    """Use read_trajectory to load a complete harness run and verify its checkpoint text."""
 
     def __init__(self, root: Path) -> None:
-        """Inject the native output root whose relative identities must be preserved."""
+        """Use root as the base directory for relative trajectory IDs."""
         self.root = root
 
-    def read(self, directory: Path) -> Trajectory:
-        """Reject incomplete or inconsistent artifacts before any source file can be replaced."""
+    def read_trajectory(self, directory: Path) -> Trajectory:
+        """Return the Trajectory stored in directory; reject incomplete runs or mismatched snapshots.
+
+        Each snapshot must equal the final conversation sliced at its saved boundary.
+        """
         metadata_text = (directory / META_FILENAME).read_text()
         audit_text = (directory / AUDIT_FILENAME).read_text()
         state = RunState.model_validate_json(zstandard.decompress((directory / CONVERSATION_FILENAME).read_bytes()))
