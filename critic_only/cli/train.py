@@ -19,7 +19,7 @@ from transformers.utils.logging import disable_progress_bar
 
 from critic_only.constants import (
     TRAINING_EPOCHS, DEFAULT_LEARNING_RATE,
-    DEFAULT_LOGGING_STEPS, DEFAULT_HIDDEN_SIZE, DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED,
+    DEFAULT_LOGGING_STEPS, DEFAULT_HIDDEN_SIZE, DEFAULT_ORACLE_WEIGHT, DEFAULT_SEED, DEFAULT_RESIDUAL_PENALTY,
     DEFAULT_TRAINING_PROBLEM_FRACTION, DEFAULT_VARIANT, DEFAULT_WARMUP_RATIO, DEFAULT_WEIGHT_DECAY,
     TRAINING_DIRECTORY, VARIANTS, DEFAULT_ORACLE_SUPERVISION_FRACTION,
     TRAINING_MODES, DEFAULT_TRAINING_MODE, DEFAULT_LORA_RANK, DEFAULT_LORA_ALPHA,
@@ -33,7 +33,7 @@ from critic_only.data.dataset_loader import load_critic_splits, input_signature
 from critic_only.eval.metrics import compute_metrics
 from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
-from critic_only.trainer.base_trainer import BaseTrainer
+from critic_only.trainer.loader import get_critic_trainer
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -46,6 +46,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=TRAINING_DIRECTORY)
     parser.add_argument("--variant", choices=VARIANTS, default=DEFAULT_VARIANT)
+    parser.add_argument("--residual-penalty", type=float, help=f"de-residual-critic only: squared logit-correction weight; default {DEFAULT_RESIDUAL_PENALTY:g}, zero disables the penalty")
     parser.add_argument("--hidden-size", type=int, default=DEFAULT_HIDDEN_SIZE)
     parser.add_argument("--oracle-supervision-fraction", type=float, default=DEFAULT_ORACLE_SUPERVISION_FRACTION)
     parser.add_argument("--oracle-weight", type=float, default=DEFAULT_ORACLE_WEIGHT)
@@ -67,6 +68,7 @@ def parse_arguments() -> argparse.Namespace:
                              f"defaults to {DEFAULT_TRAINABLE_LAYERS}; counts at or above model depth select all blocks")
     args = parser.parse_args()
     configure_training_mode(args)
+    configure_residual_penalty(args)
     if args.checkpoint_steps <= 0:
         parser.error("checkpoint-steps must be positive")
     if not math.isfinite(args.learning_rate) or min(args.batch_size, args.accumulation_steps, args.logging_steps, args.learning_rate) <= 0:
@@ -76,6 +78,25 @@ def parse_arguments() -> argparse.Namespace:
     if not 0 < args.training_problem_fraction <= 1:
         parser.error("--training-problem-fraction must be in (0, 1]")
     return args
+
+
+def configure_residual_penalty(args: argparse.Namespace) -> None:
+    """Resolve and validate the residual variant's penalty before loading data or Qwen.
+
+    Args:
+        args: Parsed variant and optional residual_penalty; the coefficient is filled in for residual DE only.
+
+    Returns:
+        None. Rejects negative/nonfinite coefficients and use with other variants.
+    """
+    if args.variant != "de-residual-critic":
+        if args.residual_penalty is not None:
+            raise ValueError("residual-penalty requires --variant de-residual-critic")
+        return
+    if args.residual_penalty is None:
+        args.residual_penalty = DEFAULT_RESIDUAL_PENALTY
+    if not math.isfinite(args.residual_penalty) or args.residual_penalty < 0:
+        raise ValueError("residual-penalty must be nonnegative and finite")
 
 
 
@@ -205,13 +226,14 @@ def main() -> None:
                             horizon=cached["horizon"], input_size=cached["hidden_size"],
                             hidden_size=args.hidden_size, data_signature=input_signature(manifest),
                             training_mode=args.training_mode, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-                            trainable_layers=args.trainable_layers, oracle_weight=args.oracle_weight)
+                            trainable_layers=args.trainable_layers, oracle_weight=args.oracle_weight,
+                            residual_penalty=args.residual_penalty)
     select_training_splits(dataset, args)
     training = training_arguments(args)
     record = validate_training_run(args, settings, training.world_size) if training.process_index == 0 else None
     model = create_critic(settings, args.cpu)
     tokenizer = CriticInputStorage(args.data).load_tokenizer()
-    trainer = BaseTrainer(model=model, args=training, data_collator=CriticBatcher(tokenizer),
+    trainer = get_critic_trainer(settings.variant)(model=model, args=training, data_collator=CriticBatcher(tokenizer),
                           train_dataset=dataset["train"],
                           eval_dataset=dataset["validation"],
                           compute_metrics=partial(compute_metrics, problem_keys=list(dataset["validation"]["problem_key"])))

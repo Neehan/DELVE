@@ -1,4 +1,4 @@
-"""Share the MLP, forward pass, loss, and checkpoint code used by all three critics."""
+"""Share the MLP, forward pass, loss weighting, and checkpoint code used by the critics."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -90,7 +90,7 @@ class BaseCritic(nn.Module, ABC):
         save_file(weights, str(directory / MODEL_FILENAME))
         (directory / CONFIG_FILENAME).write_text(self.settings.model_dump_json(indent=2) + "\n")
 
-    def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
+    def forward(self, inputs: dict[str, Tensor], oracle: Tensor, remaining_blocks: Tensor) -> dict[str, Tensor]:
         """Predict a checkpoint curve at every token of the live causal transformer.
 
         Args:
@@ -99,7 +99,7 @@ class BaseCritic(nn.Module, ABC):
             remaining_blocks: Budget to the final checkpoint [B,L], aligned with token positions.
 
         Returns:
-            Tensor: Checkpoint logits [B,L,H-1] for every variant.
+            dict: logits [B,L,H-1], plus any variant-specific tensors needed by its trainer.
         """
         output = self.language_model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], use_cache=False)
         hidden_states = output.last_hidden_state
@@ -107,7 +107,7 @@ class BaseCritic(nn.Module, ABC):
         return self.predict(projected, oracle, remaining_blocks)
 
     @abstractmethod
-    def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
+    def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> dict[str, Tensor]:
         """Map MLP outputs to exact future-checkpoint logits; implemented by each variant.
 
         Args:
@@ -116,7 +116,8 @@ class BaseCritic(nn.Module, ABC):
             remaining_blocks: Whole-block final budget [B,L], aligned with hidden states.
 
         Returns:
-            Tensor: Float32 logits [B,L,H-1], in absolute checkpoint order 2× through H×.
+            dict: Float32 logits [B,L,H-1], in absolute checkpoint order 2× through H×.
+            Subclasses may also return tensors needed for their additional loss terms.
         """
         raise NotImplementedError
 
@@ -133,5 +134,18 @@ class BaseCritic(nn.Module, ABC):
             averages horizons and valid tokens within each trajectory, then averages trajectories.
         """
         labels = labels[:, None, :].expand_as(logits)
+        losses = F.binary_cross_entropy_with_logits(logits.float(), labels.float(), reduction="none")
+        return self.weight_losses(losses, oracle)
+
+    def weight_losses(self, losses: Tensor, oracle: Tensor) -> Tensor:
+        """Apply the same trajectory weights to BCE and any auxiliary loss.
+
+        Args:
+            losses: Unreduced token/checkpoint losses [B,L,C].
+            oracle: Solver-hint flags [B]; oracle_weight scales all losses for these rows.
+
+        Returns:
+            Tensor: Weighted losses [B,L,C], before the trainer masks and averages them.
+        """
         weight = torch.where(oracle, self.settings.oracle_weight, 1.0)
-        return weight[:, None, None] * F.binary_cross_entropy_with_logits(logits.float(), labels.float(), reduction="none")
+        return weight[:, None, None] * losses

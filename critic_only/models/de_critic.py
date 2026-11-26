@@ -56,7 +56,7 @@ class DECritic(BaseCritic):
 
     def predict(
         self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor
-    ) -> Tensor:
+    ) -> dict[str, Tensor]:
         """Build the DE value curve, then select the requested checkpoint predictions.
 
         Args:
@@ -65,7 +65,7 @@ class DECritic(BaseCritic):
             remaining_blocks: Blocks until the final checkpoint, [B,L].
 
         Returns:
-            Tensor: FP32 logits [B,L,C], with C=num_checkpoints (four for 2×–5×).
+            dict: FP32 logits [B,L,C], with C=num_checkpoints (four for 2×–5×).
         """
         discovery_logits = self.discovery(hidden).float()
         execution_logits = self.execution(hidden).float()
@@ -74,7 +74,7 @@ class DECritic(BaseCritic):
         oracle_mask = oracle.reshape((-1,) + (1,) * (execution_logits.ndim - 1))
         # Oracle supplies the strategy: use epsilon directly.
         value_curve = torch.where(oracle_mask, execution_logits, unaided_curve)
-        return self._select_checkpoints(value_curve, remaining_blocks)
+        return {"logits": self._select_checkpoints(value_curve, remaining_blocks)}
 
     def _compute_unaided_curve(
         self,

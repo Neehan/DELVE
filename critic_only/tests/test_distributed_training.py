@@ -13,6 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from torch import nn
 from datasets import Dataset
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, PreTrainedTokenizerFast, TrainingArguments, set_seed
@@ -21,7 +22,7 @@ from critic_only.constants import MODEL_FILENAME
 from critic_only.data.critic_batcher import CriticBatcher
 from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
-from critic_only.trainer.base_trainer import BaseTrainer
+from critic_only.trainer.loader import get_critic_trainer
 
 
 def run_training(directory: Path, batch_size: int, accumulation: int) -> None:
@@ -36,7 +37,11 @@ def run_training(directory: Path, batch_size: int, accumulation: int) -> None:
         per_device_eval_batch_size=2, learning_rate=0.1, optim="sgd", max_grad_norm=0, weight_decay=0,
         save_strategy="no", logging_strategy="no", report_to="none", disable_tqdm=True,
         remove_unused_columns=False, label_names=["labels"], seed=17, ddp_find_unused_parameters=False)
-    trainer = BaseTrainer(model=create_critic(settings, True), args=args,
+    model = create_critic(settings, True)
+    if settings.variant == "de-residual-critic":
+        with torch.no_grad():
+            cast(nn.Linear, model.get_submodule("residual_head")).bias.fill_(0.2)
+    trainer = get_critic_trainer(settings.variant)(model=model, args=args,
         train_dataset=Dataset.from_list(rows[:4]), data_collator=CriticBatcher(tokenizer))
     trainer.train()
     prediction = trainer.predict(cast(Any, Dataset.from_list(rows)))
@@ -46,7 +51,7 @@ def run_training(directory: Path, batch_size: int, accumulation: int) -> None:
                                                            "labels": np.asarray(prediction.label_ids).tolist()}))
 
 
-@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_two_rank_training_matches_single_batch(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:

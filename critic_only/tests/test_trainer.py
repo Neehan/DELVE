@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
 from datasets import Dataset
 from transformers import PreTrainedTokenizerFast, TrainerCallback, TrainingArguments, set_seed
 from transformers.trainer_pt_utils import find_batch_size
@@ -19,6 +20,7 @@ from critic_only.models.base_critic import BaseCritic
 from critic_only.models.models import CriticConfig
 from critic_only.models.loader import create_critic
 from critic_only.trainer.base_trainer import BaseTrainer
+from critic_only.trainer.loader import get_critic_trainer
 
 
 class InterruptTraining(TrainerCallback):
@@ -45,16 +47,17 @@ def make_trainer(directory: Path, settings: CriticConfig, tokenizer: PreTrainedT
                              logging_steps=1, disable_tqdm=True,
                              metric_for_best_model="terminal_nll", greater_is_better=False, seed=17,
                              remove_unused_columns=False, label_names=["labels"], report_to="none")
-    return BaseTrainer(model=model, args=args, data_collator=CriticBatcher(tokenizer), train_dataset=data,
+    return get_critic_trainer(settings.variant)(model=model, args=args, data_collator=CriticBatcher(tokenizer), train_dataset=data,
                        eval_dataset=data, compute_metrics=partial(compute_metrics, problem_keys=list(data["problem_key"])),
                        callbacks=callbacks)
 
 
+@pytest.mark.parametrize("variant", ["ppo-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
-def test_training_resume(mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
+def test_training_resume(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
                          reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """Resuming an interrupted run must match uninterrupted training under the same schedule."""
-    settings = critic_settings("ppo-critic").model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "head" else 64,
+    settings = critic_settings(variant).model_copy(update={"training_mode": mode, "trainable_layers": None if mode == "head" else 64,
         "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
     full = make_trainer(tmp_path / "full", settings, tokenizer, reference_token_rows, [])
     full.train()
@@ -92,7 +95,7 @@ def test_metrics_persist_before_checkpoint(critic_settings: Callable[[str], Crit
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_reference_loss_and_gradients(variant: str, mode: str,
                                  critic_settings: Callable[[str], CriticConfig], tokenizer: PreTrainedTokenizerFast,
@@ -120,7 +123,7 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
         inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens),
                   "solver_mask": torch.tensor([row["privileged_solver_mask"]])}
         prediction = model(inputs=inputs, oracle=torch.tensor([row["oracle"]]),
-                           remaining_blocks=batcher([row])["remaining_blocks"])
+                           remaining_blocks=batcher([row])["remaining_blocks"])["logits"]
         losses = model.loss(prediction, labels, torch.tensor([row["oracle"]]))
         losses = losses.mean(dim=-1)
         mask = inputs["solver_mask"]
@@ -135,7 +138,7 @@ def test_reference_loss_and_gradients(variant: str, mode: str,
     assert outputs["logits"].shape == (len(rows), settings.horizon - 1)
 
 
-@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_accumulation_matches_full_batch(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
@@ -148,12 +151,15 @@ def test_accumulation_matches_full_batch(variant: str, mode: str, critic_setting
     for batch_size, accumulation in ((3, 1), (2, 2), (1, 3)):
         set_seed(17)
         model = create_critic(settings, True)
+        if variant == "de-residual-critic":
+            with torch.no_grad():
+                cast(nn.Linear, model.get_submodule("residual_head")).bias.fill_(0.2)
         args = TrainingArguments(output_dir=str(tmp_path / f"batch-{batch_size}"), max_steps=1,
             per_device_train_batch_size=batch_size, gradient_accumulation_steps=accumulation,
             learning_rate=0.1, optim="sgd", max_grad_norm=0, weight_decay=0,
             use_cpu=True, save_strategy="no", logging_strategy="no", disable_tqdm=True,
             remove_unused_columns=False, label_names=["labels"], report_to="none", seed=17)
-        trainer = BaseTrainer(model=model, args=args, train_dataset=dataset,
+        trainer = get_critic_trainer(settings.variant)(model=model, args=args, train_dataset=dataset,
             data_collator=CriticBatcher(tokenizer))
         trainer.train()
         updates.append({name: parameter.detach().clone() for name, parameter in model.named_parameters()

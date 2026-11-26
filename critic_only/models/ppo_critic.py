@@ -25,7 +25,7 @@ class PPOCritic(BaseCritic):
         super().__init__(settings)
         self.prediction_head = nn.Linear(settings.hidden_size, self.num_checkpoints, dtype=torch.float32)
 
-    def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> Tensor:
+    def predict(self, hidden: Tensor, oracle: Tensor, remaining_blocks: Tensor) -> dict[str, Tensor]:
         """Predict all future checkpoint grades directly from each encoded history.
 
         Args:
@@ -34,6 +34,6 @@ class PPOCritic(BaseCritic):
             remaining_blocks: Final budgets [B,L]; DE uses these to couple future predictions. Unused by this direct head.
 
         Returns:
-            Tensor: Float32 checkpoint logits [B,L,H-1]. Apply sigmoid only when reporting probabilities.
+            dict: Float32 checkpoint logits [B,L,H-1]. Apply sigmoid only when reporting probabilities.
         """
-        return self.prediction_head(hidden).float()
+        return {"logits": self.prediction_head(hidden).float()}

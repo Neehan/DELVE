@@ -128,7 +128,7 @@ def test_stale_objective_rejected(tmp_path: Path) -> None:
         CriticInputStorage(tmp_path).load_metadata()
 
 
-@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_token_values_are_causal(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig]) -> None:
     """A value at token t equals a separate forward stopped at t, and later tokens cannot change it."""
@@ -137,15 +137,15 @@ def test_token_values_are_causal(variant: str, mode: str, critic_settings: Calla
     model = create_critic(settings, True).eval()
     ids = torch.tensor([[2, 3, 4, 5]])
     flags, budget = torch.tensor([False]), torch.tensor([[2, 2, 2, 2]])
-    values = model({"input_ids": ids, "attention_mask": torch.ones_like(ids)}, flags, budget)
+    values = model({"input_ids": ids, "attention_mask": torch.ones_like(ids)}, flags, budget)["logits"]
     assert values.shape == (*ids.shape, settings.horizon - 1)
     for endpoint in range(1, ids.shape[1] + 1):
         prefix = ids[:, :endpoint]
-        value = model({"input_ids": prefix, "attention_mask": torch.ones_like(prefix)}, flags, budget[:, :endpoint])
+        value = model({"input_ids": prefix, "attention_mask": torch.ones_like(prefix)}, flags, budget[:, :endpoint])["logits"]
         torch.testing.assert_close(values[:, endpoint - 1], value[:, -1], atol=1e-6, rtol=1e-5)
     changed = ids.clone()
     changed[:, 2:] = 7
-    other = model({"input_ids": changed, "attention_mask": torch.ones_like(changed)}, flags, budget)
+    other = model({"input_ids": changed, "attention_mask": torch.ones_like(changed)}, flags, budget)["logits"]
     torch.testing.assert_close(values[:, :2], other[:, :2], atol=0, rtol=0)
 
 
@@ -160,7 +160,7 @@ def test_loss_masks_and_endpoint_selection(critic_settings: Callable[[str], Crit
     logits = torch.tensor([[[9., 9.], [.1, -.2], [-.3, .4], [.7, -.6]],
                            [[8., 8.], [-.5, .3], [10., 10.], [10., 10.]]], requires_grad=True)
     model = cast(BaseCritic, trainer.model)
-    monkeypatch.setattr(model, "forward", lambda **kwargs: logits)
+    monkeypatch.setattr(model, "forward", lambda **kwargs: {"logits": logits})
     loss, output = trainer.compute_loss(model, batch, return_outputs=True)
     first = torch.nn.functional.binary_cross_entropy_with_logits(logits[0, 1:], batch["labels"][0].expand(3, 2))
     second = torch.nn.functional.binary_cross_entropy_with_logits(logits[1, 1], batch["labels"][1])
@@ -181,7 +181,7 @@ def test_invalid_supervision_masks_rejected(mask: list[bool], tokenizer: PreTrai
         CriticBatcher(tokenizer)([row])
 
 
-@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_padding_cannot_change_values_or_gradients(variant: str, mode: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
@@ -193,8 +193,8 @@ def test_padding_cannot_change_values_or_gradients(variant: str, mode: str, crit
             reference_token_rows[1]]
     batch = CriticBatcher(tokenizer)(rows)
     single = CriticBatcher(tokenizer)(rows[:1])
-    values = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
-    expected = model(single["inputs"], single["oracle"], single["remaining_blocks"])
+    values = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
+    expected = model(single["inputs"], single["oracle"], single["remaining_blocks"])["logits"]
     torch.testing.assert_close(values[:1, :2], expected)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     for actual, target in zip(torch.autograd.grad(values[0, 1].sum(), parameters), torch.autograd.grad(expected[0, 1].sum(), parameters)):
@@ -215,8 +215,8 @@ def test_head_and_finetuning_initial_token_values_match(mode: str, critic_settin
                                     "privileged_solver_mask": [False, True]}]
     batch = CriticBatcher(tokenizer)(rows)
     with torch.no_grad():
-        expected = head(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
-        actual = live(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+        expected = head(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
+        actual = live(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
 
 

@@ -17,7 +17,7 @@ from critic_only.models.base_critic import BaseCritic
 class BaseTrainer(Trainer):
     """Add per-trajectory Monte Carlo loss, endpoint evaluation, logging and checkpoints to Hugging Face Trainer.
 
-    compute_loss defines our objective. Hugging Face handles batching, optimization, and resume; subclasses need no additional overrides.
+    compute_loss handles masking, averaging and endpoint selection. Subclasses override _checkpoint_losses to add objectives before reduction. Hugging Face handles batching, optimization, and resume.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -76,12 +76,13 @@ class BaseTrainer(Trainer):
                 return_outputs requests endpoint curves for evaluation.
 
         Returns:
-            Tensor: BCE averaged over horizons and solver tokens, then trajectories. With return_outputs,
+            Tensor: Objective (BCE plus any subclass penalty) averaged over horizons, solver tokens, then trajectories. With return_outputs,
             also returns endpoint logits [B,H-1]. Best-checkpoint selection still uses final-checkpoint NLL.
         """
-        logits = model(inputs=inputs["inputs"], oracle=inputs["oracle"], remaining_blocks=inputs["remaining_blocks"])
+        outputs = model(inputs=inputs["inputs"], oracle=inputs["oracle"], remaining_blocks=inputs["remaining_blocks"])
+        logits = outputs["logits"]
         critic = cast(BaseCritic, self.accelerator.unwrap_model(model))
-        checkpoint_losses = critic.loss(logits, inputs["labels"], inputs["oracle"])
+        checkpoint_losses = self._checkpoint_losses(critic, outputs, inputs["labels"], inputs["oracle"])
         trajectory_losses = self._mean_trajectory_losses(checkpoint_losses, inputs["inputs"])
         loss = self._normalize_batch_loss(
             trajectory_losses, inputs["labels"].shape[-1], kwargs.get("num_items_in_batch")
@@ -96,13 +97,27 @@ class BaseTrainer(Trainer):
         logits = logits[batch_indices, endpoint_positions]
         return loss, {"logits": logits}
 
+    def _checkpoint_losses(self, critic: BaseCritic, outputs: dict[str, Tensor], labels: Tensor, oracle: Tensor) -> Tensor:
+        """Compute per-token BCE; subclasses add their penalties here before shared reduction.
+
+        Args:
+            critic: Unwrapped critic supplying the loss and trajectory weights.
+            outputs: Model predictions containing logits [B,L,C].
+            labels: Future-checkpoint grades [B,C].
+            oracle: Solver-hint flags [B].
+
+        Returns:
+            Tensor: Weighted losses [B,L,C]; compute_loss masks non-solver tokens and averages trajectories.
+        """
+        return critic.loss(outputs["logits"], labels, oracle)
+
     def _mean_trajectory_losses(
         self, checkpoint_losses: Tensor, model_inputs: dict[str, Tensor]
     ) -> Tensor:
         """Average checkpoints and solver tokens so each trajectory has one loss.
 
         Args:
-            checkpoint_losses: Unreduced BCE [B,L,C] at every token and checkpoint.
+            checkpoint_losses: Unreduced objective [B,L,C] at every token and checkpoint.
             model_inputs: Inputs include solver_mask [B,L], excluding instructions and padding.
 
         Returns:
