@@ -3,8 +3,7 @@
 import logging
 from pathlib import Path
 
-from discovery_execution.audit.constants import COMPILED_AUDIT_FILENAME
-from discovery_execution.audit.models import AuditRecord
+from discovery_execution.outputs.bank import OutputBank
 from discovery_execution.frameworks.models import InputSelection, Observation
 from discovery_execution.frameworks.utils.constants import MIN_AUDIT_SCORE, MIN_ORACLE_SEEDS, MIN_SHORT_SEEDS, ORACLE_ARM, SHORT_ARM, TOTAL_BUDGET
 
@@ -44,26 +43,24 @@ class DataLoader:
     def _read_runs(self, directory: Path) -> dict[str, list[dict[int, bool]]]:
         """Reject mixed identities and duplicate rows; exclude incomplete seeds from fitting."""
         horizon = 1 if directory.name == SHORT_ARM else TOTAL_BUDGET
-        path = directory / COMPILED_AUDIT_FILENAME
+        path = directory
         runs: dict[str, dict[int, dict[int, bool]]] = {}
         solution_indices: dict[tuple[str, int], int] = {}
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                row = AuditRecord.model_validate_json(line)
-                if row.experiment not in ("unaided", "oracle-execution"):
-                    raise ValueError(f"continuation audits cannot be used for root DE fitting: {path}")
-                arm = f"unaided-{row.compute_multiplier_k}x" if row.experiment == "unaided" else f"oracle-at-{row.inject_sketch_at}x-execution"
-                expected_directory = self.results / row.dataset / row.solver_model / arm
-                if expected_directory != directory or row.compute_multiplier_k != horizon:
-                    raise ValueError(f"audit identity does not match {path}")
-                identity = (row.problem_id, row.seed)
-                if solution_indices.setdefault(identity, row.solution_index) != row.solution_index:
-                    raise ValueError(f"solution index changes within a trajectory in {path}")
-                checkpoint = row.checkpoint_multiplier_k
-                run = runs.setdefault(row.problem_id, {}).setdefault(row.seed, {})
-                if checkpoint in run:
-                    raise ValueError(f"duplicate audit checkpoint in {path}")
-                run[checkpoint] = row.correctness.score >= MIN_AUDIT_SCORE
+        for row in OutputBank(self.results).iter_audits(directory):
+            if row.experiment not in ("unaided", "oracle-execution"):
+                raise ValueError(f"continuation audits cannot be used for root DE fitting: {path}")
+            arm = f"unaided-{row.compute_multiplier_k}x" if row.experiment == "unaided" else f"oracle-at-{row.inject_sketch_at}x-execution"
+            expected_directory = self.results / row.dataset / row.solver_model / arm
+            if expected_directory != directory or row.compute_multiplier_k != horizon:
+                raise ValueError(f"audit identity does not match {path}")
+            identity = (row.problem_id, row.seed)
+            if solution_indices.setdefault(identity, row.solution_index) != row.solution_index:
+                raise ValueError(f"solution index changes within a trajectory in {path}")
+            checkpoint = row.checkpoint_multiplier_k
+            run = runs.setdefault(row.problem_id, {}).setdefault(row.seed, {})
+            if checkpoint in run:
+                raise ValueError(f"duplicate audit checkpoint in {path}")
+            run[checkpoint] = row.correctness.score >= MIN_AUDIT_SCORE
         expected = set(range(1, horizon + 1))
         complete = {problem: [run for run in seeds.values() if run.keys() == expected]
                     for problem, seeds in runs.items()}

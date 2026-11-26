@@ -66,6 +66,7 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
 
 def write_run(path: Path, metadata: dict[str, Any], histories: list[list[dict[str, str]]], outcomes: list[int]) -> None:
     """Save real checkpoint boundaries and later conversation text for processor integration tests."""
+    metadata = {**metadata, "arm": path.parents[2].name if "continue_at" in metadata else path.parents[1].name}
     path.mkdir(parents=True)
     (path / "meta.json").write_text(json.dumps(metadata))
     fork = metadata.get("continue_at", 0)

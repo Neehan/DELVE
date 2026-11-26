@@ -2,26 +2,27 @@
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dotenv import load_dotenv
 from huggingface_hub import HfApi
 from huggingface_hub.utils._validators import validate_repo_id
 
-from discovery_execution.harness.constants import ENV_FILE, OUTPUT_DIRECTORY, OUTPUT_UPLOAD_PATTERNS
+from discovery_execution.harness.constants import ENV_FILE, OUTPUT_DIRECTORY
+from discovery_execution.outputs.packer import OutputPacker
 
 
 def upload_outputs(api: HfApi, repository: str, directory: Path) -> None:
-    """Publish recognized output files, preserving paths and remote-only files."""
+    """Pack complete native outputs and publish only verified per-seed Parquet banks."""
     validate_repo_id(repository)
     if not directory.is_dir():
         raise FileNotFoundError(f"Output directory not found: {directory}")
-    if not any(path.is_file() for pattern in OUTPUT_UPLOAD_PATTERNS for path in directory.glob(pattern)):
-        raise ValueError(f"No saved trajectories or audits found in {directory}")
-    api.create_repo(repo_id=repository, repo_type="dataset", private=True, exist_ok=True)
-    api.upload_folder(
-        repo_id=repository, repo_type="dataset", folder_path=directory,
-        allow_patterns=OUTPUT_UPLOAD_PATTERNS, commit_message="Upload trajectories and audits",
-    )
+    with TemporaryDirectory() as temporary:
+        published = Path(temporary)
+        OutputPacker(directory, published).pack(None)
+        api.create_repo(repo_id=repository, repo_type="dataset", private=True, exist_ok=True)
+        api.upload_folder(repo_id=repository, repo_type="dataset", folder_path=published,
+                          allow_patterns=["**/seed_*.parquet"], commit_message="Upload per-seed trajectory Parquet banks")
 
 
 def main() -> None:

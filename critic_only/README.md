@@ -8,7 +8,7 @@ DE remains a discrete block model: interior first-block tokens use rounded-up re
 
 ```bash
 uv sync --locked --extra frozen
-uv run --extra frozen python -m critic_only.cli.setup --outputs-directory data/outputs --solver-model qwen3-4b-instruct-2507 --destination data/outputs/processed-curves
+uv run --extra frozen python -m critic_only.cli.setup --outputs-directory data/outputs/published --solver-model qwen3-4b-instruct-2507 --destination data/outputs/processed-curves
 DATA=data/outputs/processed-curves/qwen3-4b-instruct-2507
 RUN=output/critic_only/curve-full-8
 uv run --extra frozen torchrun --standalone --nproc_per_node=2 -m critic_only.cli.train --data "$DATA" --output "$RUN" --variant ppo-oracle-critic
@@ -20,3 +20,5 @@ Every training mode runs exactly one epoch; there is no `--epochs` override. Def
 `ppo-critic` uses unaided training histories; `ppo-oracle-critic` and `de-critic` also use oracle histories. Every mode trains the shared MLP and prediction heads with the same all-token loss: `head` freezes Qwen, `lora` trains adapters, and `full` trains selected Qwen layers.
 
 For an existing processed model, run `python -m critic_only.cli.setup --reprocess --destination data/outputs/processed --solver-model qwen3-4b-instruct-2507` while training is stopped. This keeps the raw trajectory shards and `splits.parquet`, saves all ten 4k checkpoints through 40,960 tokens, and replaces superseded checkpoint/token files after validation. Only the first five checkpoints define this training task. Previous critic caches/checkpoints are incompatible; start a new training run. Training uses 1,000 pre-2026 problems, validation the remaining older problems, and test 2026 onward. Select settings on validation before evaluating test. Setup never uploads data. Saved 8k boundaries retain their reviewed grades; each original block is split into roughly equal halves of retokenized assistant text using the pinned tokenizer. The 4k budgets are nominal: original token IDs were not saved. Actual segment token counts and boundary provenance are saved in the checkpoint table. Corrupt boundaries or grading errors abort preparation with the trajectory ID; no seed is silently dropped.
+
+Published solver inputs use one versioned Parquet bank per contest/year/model/arm/seed, with separate parent-seed directories for branches. `--outputs-repo` downloads only these banks at the requested immutable revision; `--outputs-directory` points to the same layout locally. For local generation files, run `python -m discovery_execution.scripts.pack_outputs` first. The shared reader reconstructs the original conversation and saved checkpoint boundaries before the existing critic input preparation. Migration preserves the original grading rule; legacy grades still require the separate re-audit described above.

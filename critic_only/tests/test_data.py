@@ -21,6 +21,7 @@ from critic_only.data.critic_input_processor import CriticInputProcessor, is_inp
 from critic_only.data.tokenizer import PrefixTokenizer
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.trajectory_processor import TrajectoryProcessor
+from discovery_execution.outputs.packer import OutputPacker
 from discovery_execution.processing.checkpoint_reconstructor import CheckpointReconstructor
 from discovery_execution.processing.problem_splits import ProblemSplits
 from discovery_execution.audit.answer_grader import AnswerGrader
@@ -31,7 +32,9 @@ from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 def compile_fixture(config: CollectionFixture) -> CriticInputProcessor:
     """Compile real raw artifacts, then select critic inputs from the shared Parquet collection."""
     splits = ProblemSplits(config.datasets_directory, config.destination.parent, 1)
-    TrajectoryProcessor(config.outputs_directory, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS)
+    published = config.destination.parent / "published"
+    OutputPacker(config.outputs_directory, published).pack(TRAJECTORY_SEEDS)
+    TrajectoryProcessor(published, config.destination, config.solver_model, splits).compile_trajectories("fixture", TRAJECTORY_SEEDS)
     backend = Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     backend.pre_tokenizer = Whitespace()
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
@@ -151,7 +154,7 @@ def test_duplicate_root_seed_rejected(prepared_inputs: CollectionFixture) -> Non
     source = next(path.parent for path in prepared_inputs.outputs_directory.rglob("meta.json")
                   if json.loads(path.read_text())["experiment"] == "unaided")
     shutil.copytree(source, source.with_name("duplicate"))
-    with pytest.raises(ValueError, match="duplicate saved trajectory"):
+    with pytest.raises(ValueError, match="identity does not match path"):
         list(compile_fixture(prepared_inputs).iter_inputs())
 
 

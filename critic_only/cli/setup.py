@@ -26,7 +26,7 @@ from discovery_execution.processing.checkpoint_reconstructor import CheckpointRe
 from discovery_execution.processing.storage import read_manifest, write_json_atomic, write_parquet_atomic, file_digest
 
 from discovery_execution.harness.constants import (
-    AUDIT_FILENAME, CHECKPOINT_FILENAME, CONVERSATION_FILENAME, DATASETS_DIRECTORY, META_FILENAME,
+    DATASETS_DIRECTORY,
     SUPPORTED_MODELS, MAX_BLOCKS,
 )
 from discovery_execution.processing.constants import (PROCESSED_DIRECTORY, TRAIN_PROBLEMS, CHECKPOINT_INTERVAL_TOKENS,
@@ -36,7 +36,7 @@ from discovery_execution.processing.problem_splits import ProblemSplits
 
 
 def download_outputs(repository: str, revision: str, solver: str) -> tuple[Path, str]:
-    """Download one solver's raw output files at a fixed Hugging Face commit.
+    """Download one solver's published Parquet banks at a fixed Hugging Face commit.
 
     Args:
         repository: Hugging Face dataset repository containing solver outputs.
@@ -49,8 +49,7 @@ def download_outputs(repository: str, revision: str, solver: str) -> tuple[Path,
     resolved = HfApi().dataset_info(repository, revision=revision).sha
     if resolved is None:
         raise ValueError("HF output revision could not be resolved")
-    names = [META_FILENAME, CONVERSATION_FILENAME, AUDIT_FILENAME, CHECKPOINT_FILENAME.format(k="*")]
-    patterns = [f"*/*/{solver}/**/{name}" for name in names]
+    patterns = [f"*/*/{solver}/**/seed_*.parquet"]
     root = Path(snapshot_download(repository, repo_type="dataset", revision=resolved, allow_patterns=patterns))
     return root, f"{repository}@{resolved}"
 

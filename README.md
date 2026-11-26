@@ -122,7 +122,11 @@ uv run python -m discovery_execution.cli.run --competition aime --year 2024 --mo
 
 Use `--experiment continue-oracle` to inject a sketch at that same prefix; its default solution is selected by the source seed, shared across branches. The 5× default budget includes the prefix. Outputs use `<arm>/<problem>/seed_<source-seed>/branch_<seed>/`, with arms `continue-at-1x` or `continue-oracle-at-1x`. Only post-fork checkpoints are saved, on the original timeline. Audit accepts the same source selectors; continuation arms are excluded from DE fitting. Reusing a branch directory with different source settings or budget fails.
 
-After generation and auditing finish, run `bash discovery_execution/scripts/upload_outputs.sh` from a network-enabled shell. It uploads these artifacts to `HF_OUTPUTS_REPO`, preserving paths below `output/` and excluding locks and temporary files. A missing repository is created private; existing visibility is unchanged. Rerunning updates matching paths without deleting remote-only files.
+After generation and auditing finish, run `bash discovery_execution/scripts/upload_outputs.sh` from a network-enabled shell. It validates and packs native files into versioned Parquet banks, then uploads only those banks to `HF_OUTPUTS_REPO`. Native generation files stay local for resuming. A missing repository is created private; existing visibility is unchanged. The uploader does not delete remote files.
+
+Published paths are `<competition>/<year>/<model>/<arm>/seed_<n>.parquet`; branches use `<arm>/source_seed_<parent>/seed_<child>.parquet`. Each row is one problem trajectory with explicit identity columns, original metadata/audit JSON, nested conversation messages and checkpoint boundaries, request history, and raw checkpoint grades. Checkpoint snapshots are reconstructed from the stored message/character boundaries, which are checked against every native snapshot before packing. Raw correctness regressions and saved grading-rule provenance are preserved; migration does not re-grade answers.
+
+Create local banks for analysis with `uv run python -m discovery_execution.scripts.pack_outputs --source output --destination data/outputs/published`. Packing checks complete token budgets, snapshots, identities, and every Parquet round trip; it refuses to replace existing destination banks. Both critic setup and DE fitting read this same format; neither needs to extract native output trees.
 
 On MIT ORCD, the Slurm script starts vLLM, generates, audits, then stops the server. Prepare the dataset and cache weights first; the script uses the existing ORCD installation in offline mode. It requests 2× L40S for 6 hours. `--batch-size N` overrides both server and harness concurrency.
 
@@ -134,7 +138,7 @@ Grades use DE's `correctness.score` field, restricted to 0 or 1. Math-Verify che
 
 **Fit the frameworks**
 
-SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. Fit from audited `unaided-1x` and `oracle-at-0x-execution` arms under the selected model:
+SG, DE, R-SG, and R-DE reuse DE-Framework's estimators. Pack outputs first, then fit from the `unaided-1x` and `oracle-at-0x-execution` seed banks in `data/outputs/published/` under the selected model. The loader projects metadata/audit columns without loading conversation text; fits and predictions remain local under `output/`:
 
 ```bash
 uv run python -m discovery_execution.cli.frameworks --competition aime --year 2024 \

@@ -1,7 +1,8 @@
 """Check upload selection, credentials, and failures without publishing data."""
 
-from fnmatch import fnmatch
+import pyarrow.parquet as pq
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -11,24 +12,22 @@ from discovery_execution.scripts.upload_outputs import main, upload_outputs
 
 def test_upload_preserves_paths_and_excludes_non_artifacts(hf_upload_api: Mock, output_artifacts: Path) -> None:
     """Upload only recognized artifacts at their existing relative paths, without remote deletion."""
+    captured = []
+    def inspect_upload(**arguments: Any) -> None:
+        """Inspect real staged Parquet while the upload call still owns its temporary directory."""
+        root = Path(arguments["folder_path"])
+        paths = list(root.rglob("*"))
+        captured.extend(path.relative_to(root).as_posix() for path in paths if path.is_file())
+        bank, = root.rglob("*.parquet")
+        row, = pq.ParquetFile(bank).read().to_pylist()
+        assert row["problem_id"] == "example" and row["grades"] == [{"block": 1, "score": 1}]
+        assert "delete_patterns" not in arguments
+    hf_upload_api.upload_folder.side_effect = inspect_upload
     upload_outputs(hf_upload_api, "owner/outputs", output_artifacts)
-    hf_upload_api.create_repo.assert_called_once_with(
-        repo_id="owner/outputs", repo_type="dataset", private=True, exist_ok=True,
-    )
+    hf_upload_api.create_repo.assert_called_once_with(repo_id="owner/outputs", repo_type="dataset", private=True, exist_ok=True)
     hf_upload_api.upload_folder.assert_called_once()
-    arguments = hf_upload_api.upload_folder.call_args.kwargs
-    assert arguments["folder_path"] == output_artifacts
-    assert arguments["repo_id"] == "owner/outputs"
-    assert arguments["repo_type"] == "dataset"
-    assert "delete_patterns" not in arguments
-    assert "path_in_repo" not in arguments
-    selected = {path.relative_to(output_artifacts).as_posix() for path in output_artifacts.rglob("*")
-                if path.is_file() and any(fnmatch(path.relative_to(output_artifacts).as_posix(), pattern)
-                                          for pattern in arguments["allow_patterns"])}
-    arm = "aime/2024/model/unaided-1x"
-    assert selected == {f"{arm}/audit.jsonl", *(f"{arm}/example/seed_0/{name}" for name in (
-        "meta.json", "conversation.json.zst", "checkpoint_1x.json.zst", "audit.json",
-    ))}
+    assert captured == ["aime/2024/model/unaided-1x/seed_0.parquet"]
+
 
 
 @pytest.mark.parametrize("existing", [False, True])

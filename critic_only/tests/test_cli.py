@@ -27,6 +27,7 @@ from critic_only.cli import evaluate, setup, train
 from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
+from discovery_execution.outputs.packer import OutputPacker
 
 
 @pytest.fixture
@@ -127,12 +128,14 @@ def test_setup_cli(prepared_inputs: CollectionFixture, critic_settings: Callable
     settings = critic_settings("ppo-critic")
     tokenizer.save_pretrained(settings.model)
     root = prepared_inputs.destination.parent / "processed"
+    published = prepared_inputs.destination.parent / "published"
+    OutputPacker(prepared_inputs.outputs_directory, published).pack(None)
     api = Mock(); api.model_info.return_value.sha = "local"
     monkeypatch.setattr(setup, "HfApi", Mock(return_value=api))
     monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
     monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", OUTPUT_TOKENS_PER_BLOCK)
     monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
-    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(prepared_inputs.outputs_directory),
+    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(published),
         "--datasets-directory", str(prepared_inputs.datasets_directory), "--destination", str(root), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
     setup.main()
     assert (root / "splits.parquet").is_file()
@@ -323,7 +326,7 @@ def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokeniz
     from_path = prepared_inputs.outputs_directory
     root = prepared_inputs.destination.parent / "finer"
     sources = root / "raw"
-    for module in ("discovery_execution.processing.trajectory_processor", "critic_only.data.critic_input_processor",
+    for module in ("discovery_execution.outputs.models", "discovery_execution.outputs.native", "critic_only.data.critic_input_processor",
                    "discovery_execution.processing.checkpoint_reconstructor"):
         monkeypatch.setattr(f"{module}.OUTPUT_TOKENS_PER_BLOCK", 8)
     for path in from_path.rglob("meta.json"):
@@ -339,7 +342,9 @@ def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokeniz
     monkeypatch.setattr(setup, "SUPPORTED_MODELS", {"tiny": settings.model})
     monkeypatch.setattr(setup, "TRAIN_PROBLEMS", 1)
     monkeypatch.setattr(setup, "CHECKPOINT_INTERVAL_TOKENS", 4)
-    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(sources), "--destination", str(root / "processed"),
+    published = root / "published"
+    OutputPacker(sources, published).pack(None)
+    monkeypatch.setattr("sys.argv", ["setup", "--outputs-directory", str(published), "--destination", str(root / "processed"),
         "--datasets-directory", str(prepared_inputs.datasets_directory), "--solver-model", "tiny", "--horizon", "3", "--max-length", "256"])
     setup.main()
     directory = root / "processed" / "tiny"

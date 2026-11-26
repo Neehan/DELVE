@@ -12,6 +12,7 @@ dependencies = [
   "zstandard==0.25.0",
   "numpy==2.4.3",
   "scipy==1.17.1",
+  "pyarrow==26.0.0",
 ]
 
 [dependency-groups]
