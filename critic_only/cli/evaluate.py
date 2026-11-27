@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+from accelerate import PartialState
 from datasets import Dataset
 from datasets.utils import disable_progress_bars
 from scipy.special import expit
@@ -74,8 +75,11 @@ def main() -> None:
         args.batch_size = DEFAULT_TOKEN_BATCH_SIZE
     if args.batch_size <= 0:
         parser.error("batch-size must be positive")
+    distributed = PartialState(cpu=args.cpu)
     if args.destination.exists():
         raise FileExistsError(args.destination)
+    # Every rank must finish this check before Trainer can create the output directory.
+    distributed.wait_for_everyone()
     datasets, cache = load_critic_splits(args.data, (args.split,))
     if input_signature(cache) != settings.data_signature:
         raise ValueError("evaluation inputs differ from training")
