@@ -9,6 +9,7 @@ from transformers import AutoModel
 from critic_only.constants import CPU_ATTENTION, DEFAULT_ATTENTION
 from critic_only.models.base_critic import BaseCritic
 from critic_only.models.de_critic import DECritic
+from critic_only.models.de_residual_critic import DEResidualCritic
 from critic_only.models.models import CriticConfig
 from critic_only.models.ppo_oracle_critic import PPOOracleCritic
 from critic_only.models.ppo_critic import PPOCritic
@@ -24,9 +25,10 @@ def create_critic(settings: CriticConfig, cpu: bool) -> BaseCritic:
         cpu: Use FP32/SDPA for CPU execution or BF16/FlashAttention-2 for GPU execution.
 
     Returns:
-        BaseCritic: Fresh PPOCritic, PPOOracleCritic, or DECritic; call load_from_weights to restore trained weights.
+        BaseCritic: Fresh selected critic; call load_from_weights to restore trained weights.
     """
-    classes = {"ppo-critic": PPOCritic, "ppo-oracle-critic": PPOOracleCritic, "de-critic": DECritic}
+    classes = {"ppo-critic": PPOCritic, "ppo-oracle-critic": PPOOracleCritic,
+               "de-critic": DECritic, "de-residual-critic": DEResidualCritic}
     critic = classes[settings.variant](settings)
     model = AutoModel.from_pretrained(settings.model, revision=settings.revision,
                                       dtype=torch.float32 if cpu else torch.bfloat16,

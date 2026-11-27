@@ -26,7 +26,7 @@ from critic_only.data.critic_input_processor import select_unaided_examples
 from critic_only.eval.metrics import evaluation_report
 from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
-from critic_only.trainer.base_trainer import BaseTrainer
+from critic_only.trainer.loader import get_critic_trainer
 
 
 def save_evaluation(result: PredictionOutput, dataset: Dataset, args: argparse.Namespace) -> None:
@@ -86,7 +86,7 @@ def main() -> None:
                                  per_device_eval_batch_size=args.batch_size, remove_unused_columns=False,
                                  label_names=["labels"], report_to="none", disable_tqdm=True)
     tokenizer = CriticInputStorage(args.data).load_tokenizer()
-    trainer = BaseTrainer(model=model, args=training, data_collator=CriticBatcher(tokenizer))
+    trainer = get_critic_trainer(settings.variant)(model=model, args=training, data_collator=CriticBatcher(tokenizer))
     result = trainer.predict(cast(Any, dataset))
     if trainer.is_world_process_zero():
         save_evaluation(result, dataset, args)

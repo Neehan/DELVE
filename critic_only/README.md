@@ -6,6 +6,8 @@ All critics apply a width-512 GELU MLP to every solver token’s final-layer hid
 
 PPO predicts four unrestricted logits. DE combines geometric discovery with an execution curve; oracle histories use execution alone. DE rounds remaining budgets up to whole blocks, and execution probabilities may decrease across checkpoints.
 
+`de-residual-critic` inherits DE and adds a zero-initialized correction to each checkpoint logit. Its trainer adds `λ × residual²` to BCE using the same token masks and trajectory weights. `--residual-penalty` sets λ (untuned default `0.01`; `0` disables the penalty). Reported NLL/Brier and checkpoint selection use corrected predictions without adding the penalty.
+
 Start from exported trajectory Parquet files (`discovery_execution.scripts.export_outputs`), or use `--outputs-repo REPO --revision COMMIT` instead of `--outputs-directory`. HF downloads are temporary; setup retains split trajectory shards for reprocessing and separate tokenized training inputs. User-supplied local exports are untouched.
 
 ```bash
@@ -19,6 +21,6 @@ uv run --extra frozen python -m critic_only.cli.evaluate --data "$DATA" --checkp
 
 Defaults: one epoch, random head, full tuning of eight Qwen blocks, LR 1e-5, batch 1 per GPU and accumulation 16. Two GPUs give effective batch 32 and 500 updates, with validation/checkpoints every 125 updates. AdamW uses 5% warm-up, linear decay and weight decay 0.01. GPU runs require FlashAttention-2. Resume with `--resume RUN/checkpoint-N`.
 
-`ppo-critic` trains on unaided histories; `ppo-oracle-critic` and `de-critic` also use oracle histories. All use the same all-token loss. Training modes: `head` freezes Qwen, `lora` trains adapters, and `full` trains selected Qwen layers.
+`ppo-critic` trains on unaided histories; the other variants also use oracle histories. All supervise the same solver tokens and checkpoint labels. Training modes: `head` freezes Qwen, `lora` trains adapters, and `full` trains selected Qwen layers.
 
 Generation still uses 8,192-token blocks. Setup splits each into roughly equal halves of retokenized text, preserving original boundaries and reviewed grades; all ten analysis checkpoints are saved. Export does not re-grade legacy audits. To rebuild derived inputs, stop training and run setup with `--reprocess --destination data/outputs/processed-curves --solver-model qwen3-4b-instruct-2507`. Splits and source trajectories are retained; changed inputs require a new training run.

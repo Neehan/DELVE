@@ -20,16 +20,17 @@ from critic_only.models.loader import create_critic
 from critic_only.models.models import CriticConfig
 
 
-@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic", "de-residual-critic"])
 def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str], CriticConfig],
                                    tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]], tmp_path: Path) -> None:
     """All MLP and head parameters train; compact checkpoints reproduce predictions exactly."""
     model = create_critic(critic_settings(variant), True)
-    assert type(model).__name__ == {"ppo-critic": "PPOCritic", "ppo-oracle-critic": "PPOOracleCritic", "de-critic": "DECritic"}[variant]
+    assert type(model).__name__ == {"ppo-critic": "PPOCritic", "ppo-oracle-critic": "PPOOracleCritic",
+                                  "de-critic": "DECritic", "de-residual-critic": "DEResidualCritic"}[variant]
     batch = CriticBatcher(tokenizer)(reference_token_rows)
     labels = batch.pop("labels")
     model.train()
-    prediction = model(**batch)
+    prediction = model(**batch)["logits"]
     assert prediction.shape == (*batch["inputs"]["input_ids"].shape, model.settings.horizon - 1)
     loss = model.loss(prediction, labels, batch["oracle"]).mean()
     loss.backward()
@@ -38,12 +39,12 @@ def test_mlp_backward_and_restore(variant: str, critic_settings: Callable[[str],
     assert all(not parameter.requires_grad and parameter.grad is None for parameter in model.language_model.parameters())
     directory = tmp_path / "checkpoint"
     model.eval()
-    expected = model(**batch).detach()
+    expected = model(**batch)["logits"].detach()
     model.save(directory)
     restored = create_critic(critic_settings(variant), True)
     restored.load_from_weights(directory)
     restored.eval()
-    torch.testing.assert_close(restored(**batch), expected)
+    torch.testing.assert_close(restored(**batch)["logits"], expected)
     assert (directory / "critic.safetensors").is_file()
 
 
@@ -84,7 +85,7 @@ def test_de_allows_regression(critic_settings: Callable[[str], CriticConfig]) ->
         model.discovery.bias.fill_(30)
         model.execution.weight.zero_()
         model.execution.bias.copy_(torch.tensor([2.0, -2.0, 1.0]))
-    output = model.predict(torch.zeros(2, model.settings.hidden_size), torch.tensor([False, False]), torch.tensor([2, 2]))
+    output = model.predict(torch.zeros(2, model.settings.hidden_size), torch.tensor([False, False]), torch.tensor([2, 2]))["logits"]
     torch.testing.assert_close(output, torch.tensor([[2., -2.], [2., -2.]]))
     assert (output[:, 1] < output[:, 0]).all()
 
@@ -93,7 +94,7 @@ def test_direct_head_is_shared_across_history_types(critic_settings: Callable[[s
     """Condition metadata must not select a separate direct-model head; the actual history provides context."""
     model = create_critic(critic_settings("ppo-oracle-critic"), True)
     hidden = torch.randn(1, model.settings.hidden_size).expand(2, -1)
-    prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([2, 2]))
+    prediction = model.predict(hidden, torch.tensor([False, True]), torch.tensor([2, 2]))["logits"]
     assert prediction.shape == (2, 2)
     torch.testing.assert_close(prediction[0], prediction[1])
 
@@ -103,7 +104,7 @@ def test_oracle_de_uses_execution_head(critic_settings: Callable[[str], CriticCo
     model = DECritic(critic_settings("de-critic"))
     hidden = torch.randn(2, model.settings.hidden_size)
     oracle = torch.tensor([True, True])
-    prediction = model.predict(hidden, oracle, torch.tensor([2, 2]))
+    prediction = model.predict(hidden, oracle, torch.tensor([2, 2]))["logits"]
     torch.testing.assert_close(prediction, model.execution(hidden)[:, :2])
     labels = torch.tensor([[0., 1.], [1., 0.]])
     model.loss(prediction[:, None, :], labels, oracle).mean().backward()
@@ -163,7 +164,7 @@ def test_de_bfloat16_extremes_remain_finite(confidence: float, oracle: bool, rem
     labels = torch.full((1, 2), 1. if confidence < 0 else 0.)
     condition = torch.tensor([oracle])
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        prediction = model.predict(torch.zeros(1, model.settings.hidden_size), condition, torch.tensor([remaining]))
+        prediction = model.predict(torch.zeros(1, model.settings.hidden_size), condition, torch.tensor([remaining]))["logits"]
         loss = model.loss(prediction[:, None, :], labels, condition).mean()
     assert torch.isfinite(prediction).all()
     assert torch.isfinite(loss)
@@ -184,7 +185,7 @@ def test_vectorized_de_matches_convolution(horizon: int, dtype: torch.dtype,
     remaining = torch.tensor([[horizon, horizon - 1], [horizon, horizon - 1]])
     hidden = torch.randn(2, 2, model.settings.hidden_size, requires_grad=True)
     with torch.autocast("cpu", dtype=dtype, enabled=dtype == torch.bfloat16):
-        prediction = model.predict(hidden, torch.zeros(2, dtype=torch.bool), remaining)
+        prediction = model.predict(hidden, torch.zeros(2, dtype=torch.bool), remaining)["logits"]
         alpha = model.discovery(hidden).float().sigmoid().squeeze(-1)
         epsilon = model.execution(hidden).float().sigmoid()
     curve = []
@@ -211,7 +212,7 @@ def test_lora_updates_adapters_only(critic_settings: Callable[[str], CriticConfi
     settings = critic_settings("ppo-critic").model_copy(update={"training_mode": "lora", "lora_rank": 2, "lora_alpha": 4, "trainable_layers": 64})
     model = create_critic(settings, True)
     batch = CriticBatcher(tokenizer)(reference_token_rows)
-    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     labels = batch["labels"]
     model.loss(logits, labels, batch["oracle"]).mean().backward()
     assert model.language_model is not None
@@ -239,7 +240,7 @@ def test_lora_layer_selection(layer_count: int, expected_layers: set[int],
                                            "lora_rank": 2, "lora_alpha": 4, "trainable_layers": layer_count})
     model = create_critic(settings, True)
     batch = CriticBatcher(tokenizer)(reference_token_rows)
-    model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).sum().backward()
+    model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"].sum().backward()
     assert model.language_model is not None
     embedding_layer = model.language_model.get_submodule("base_model.model.embed_tokens")
     embeddings = embedding_layer(batch["inputs"]["input_ids"])
@@ -253,7 +254,7 @@ def test_lora_layer_selection(layer_count: int, expected_layers: set[int],
         assert (parameter.grad is not None) == ("lora_" in name)
     torch.optim.SGD(model.parameters(), lr=0.1).step()
     model.eval()
-    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     checkpoint = tmp_path / "checkpoint"
     model.save(checkpoint)
     saved_settings = CriticConfig.model_validate_json((checkpoint / CONFIG_FILENAME).read_text())
@@ -261,7 +262,7 @@ def test_lora_layer_selection(layer_count: int, expected_layers: set[int],
     restored = create_critic(saved_settings, True)
     restored.load_from_weights(checkpoint)
     restored.eval()
-    actual = restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    actual = restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     torch.testing.assert_close(actual, expected)
 
 
@@ -285,7 +286,7 @@ def test_full_layer_selection_updates_and_restores(layer_count: int, expected_la
                          or any(name.startswith(f"language_model.layers.{index}.") for index in expected_layers)}
     assert all(parameter.dtype == torch.float32 for parameter in model.parameters() if parameter.requires_grad)
     model.train()
-    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     model.loss(logits, batch["labels"], batch["oracle"]).mean().backward()
     assert all((parameter.grad is not None) == (name in trainable) for name, parameter in model.named_parameters())
     torch.optim.AdamW([parameter for parameter in model.parameters() if parameter.requires_grad], lr=1e-4).step()
@@ -293,10 +294,10 @@ def test_full_layer_selection_updates_and_restores(layer_count: int, expected_la
     assert changed <= trainable
     assert all(any(name.startswith(f"language_model.layers.{index}.") for name in changed) for index in expected_layers)
     model.eval()
-    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"]).detach()
+    expected = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"].detach()
     checkpoint = tmp_path / "full-layer-checkpoint"
     model.save(checkpoint)
     restored = create_critic(CriticConfig.model_validate_json((checkpoint / CONFIG_FILENAME).read_text()), True)
     restored.load_from_weights(checkpoint)
     restored.eval()
-    torch.testing.assert_close(restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"]), expected, rtol=0, atol=0)
+    torch.testing.assert_close(restored(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"], expected, rtol=0, atol=0)

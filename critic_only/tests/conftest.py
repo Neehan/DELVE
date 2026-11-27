@@ -19,7 +19,7 @@ from discovery_execution.harness.constants import OUTPUT_TOKENS_PER_BLOCK
 from discovery_execution.vllm.constants import TEMPLATES_DIRECTORY
 from critic_only.tests.models import CollectionFixture
 from critic_only.models.models import CriticConfig
-from critic_only.constants import CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH
+from critic_only.constants import CRITIC_PROMPT_PATH, REFERENCE_PROMPT_PATH, DEFAULT_RESIDUAL_PENALTY
 from discovery_execution.processing.constants import CHECKPOINT_INTERVAL_TOKENS
 
 
@@ -59,7 +59,8 @@ def critic_settings(tmp_path: Path) -> Callable[[str], CriticConfig]:
         """Keep all settings except the prediction variant matched."""
         return CriticConfig.model_validate(dict(model=str(directory), revision="local", variant=variant, horizon=3,
                                                 input_size=16, hidden_size=16, data_signature="test-signature",
-                                                oracle_weight=1, training_mode="head", lora_rank=None, lora_alpha=None))
+                                                oracle_weight=1, training_mode="head", lora_rank=None, lora_alpha=None,
+                                                residual_penalty=DEFAULT_RESIDUAL_PENALTY if variant == "de-residual-critic" else None))
 
     return create
 

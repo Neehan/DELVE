@@ -77,7 +77,7 @@ def save_token_inputs(root: Path, settings: CriticConfig, rows: list[dict[str, A
     write_json_atomic(root / "manifest.json", {"tokenization": tokenization})
 
 
-@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic", "de-residual-critic"])
 @pytest.mark.parametrize("fraction", [1.0, 0.5])
 @pytest.mark.parametrize("mode", ["head", "lora", "full"])
 def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic_settings: Callable[[str], CriticConfig],
@@ -88,8 +88,8 @@ def test_train_and_evaluate_cli(variant: str, fraction: float, mode: str, critic
     root, output, report = tmp_path / "data", tmp_path / "run", tmp_path / "evaluation"
     save_token_inputs(root, settings, reference_token_rows)
     tokenizer.save_pretrained(root / "critic_only" / "tokenizer")
-    trainer_factory = Mock(wraps=train.BaseTrainer)
-    monkeypatch.setattr(train, "BaseTrainer", trainer_factory)
+    trainer_factory = Mock(wraps=train.get_critic_trainer(variant))
+    monkeypatch.setattr(train, "get_critic_trainer", Mock(return_value=trainer_factory))
     monkeypatch.setattr("sys.argv", ["train", "--data", str(root), "--output", str(output), "--variant", variant,
         "--training-mode", mode, "--accumulation-steps", "1", "--hidden-size", "16", "--batch-size", "2", "--training-problem-fraction", str(fraction), "--cpu"])
     train.main()
@@ -409,7 +409,7 @@ def test_finer_setup_to_native_model(prepared_inputs: CollectionFixture, tokeniz
             "lora_rank": 2 if mode == "lora" else None, "lora_alpha": 4 if mode == "lora" else None})
         critic = create_critic(model_settings, True)
         batch = CriticBatcher(tokenizer)(rows)
-        logits = critic(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+        logits = critic(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
         loss = critic.loss(logits, batch["labels"], batch["oracle"])
         assert torch.isfinite(loss).all()
         (loss.mean(-1) * batch["inputs"]["solver_mask"]).sum().backward()

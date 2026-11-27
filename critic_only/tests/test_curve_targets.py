@@ -34,7 +34,7 @@ def test_invalid_curve_labels_rejected(labels: Any, tokenizer: PreTrainedTokeniz
 
 
 @pytest.mark.parametrize("horizon", [2, 3, 5])
-@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic"])
+@pytest.mark.parametrize("variant", ["ppo-critic", "ppo-oracle-critic", "de-critic", "de-residual-critic"])
 def test_every_token_receives_every_horizon(horizon: int, variant: str, critic_settings: Callable[[str], CriticConfig],
     tokenizer: PreTrainedTokenizerFast, reference_token_rows: list[dict[str, Any]]) -> None:
     """All variants return the same token/curve axes; no checkpoint is replaced by a cumulative label."""
@@ -44,7 +44,7 @@ def test_every_token_receives_every_horizon(horizon: int, variant: str, critic_s
              "labels": [float((index + offset + 1) % 2) for offset in range(horizon - 1)]}
             for index, row in enumerate(reference_token_rows)]
     batch = CriticBatcher(tokenizer)(rows)
-    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])
+    logits = model(batch["inputs"], batch["oracle"], batch["remaining_blocks"])["logits"]
     assert logits.shape == (2, 4, horizon - 1)
     labels = batch["labels"]
     assert labels.tolist() == [row["labels"] for row in rows]
