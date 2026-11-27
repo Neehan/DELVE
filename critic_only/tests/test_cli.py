@@ -5,9 +5,11 @@ import shutil
 import weakref
 from fnmatch import fnmatch
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier, Event, local
 from typing import Any, Iterator
 from unittest.mock import Mock
 
@@ -30,6 +32,43 @@ from critic_only.models.models import CriticConfig
 from critic_only.tests.models import CollectionFixture
 from discovery_execution.processing.storage import file_digest, write_json_atomic, write_parquet_atomic
 from discovery_execution.outputs.parquet_exporter import ParquetTrajectoryExporter
+
+
+def test_evaluation_checks_destination_before_any_rank_loads(
+    critic_settings: Callable[[str], CriticConfig], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed rank must check the destination before a faster rank can create it."""
+    checkpoint, destination = tmp_path / "checkpoint", tmp_path / "evaluation"
+    checkpoint.mkdir()
+    (checkpoint / "critic.json").write_text(critic_settings("de-residual-critic").model_dump_json())
+    monkeypatch.setattr("sys.argv", ["evaluate", "--data", str(tmp_path), "--checkpoint", str(checkpoint),
+        "--destination", str(destination), "--split", "validation", "--cpu"])
+    ranks, started_loading, state = Barrier(2, timeout=5), Event(), local()
+    original_exists = Path.exists
+
+    def delayed_exists(path: Path) -> bool:
+        """Delay rank one while rank zero tries to reach model loading."""
+        if path == destination and state.rank == 1:
+            started_loading.wait(timeout=0.2)
+        return original_exists(path)
+
+    def stop_at_loading(*args: Any) -> None:
+        """Simulate Trainer's directory creation, then stop before expensive model loading."""
+        destination.mkdir(exist_ok=True)
+        started_loading.set()
+        raise StopIteration
+
+    def run_rank(rank: int) -> None:
+        """Run one evaluation rank through its output-directory check."""
+        state.rank = rank
+        with pytest.raises(StopIteration):
+            evaluate.main()
+
+    monkeypatch.setattr(Path, "exists", delayed_exists)
+    monkeypatch.setattr(evaluate, "PartialState", Mock(return_value=Mock(wait_for_everyone=ranks.wait)), raising=False)
+    monkeypatch.setattr(evaluate, "load_critic_splits", stop_at_loading)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(run_rank, (0, 1)))
 
 
 @pytest.fixture
